@@ -63,16 +63,26 @@ code --install-extension api-shadow-0.1.0.vsix
 
 ## Publish to the Visual Studio Marketplace
 
+The extension is published under the existing publisher **`OmairSaad`** (display name "Omair Saad", the same publisher as SQLite Forge), so its Marketplace ID is `OmairSaad.api-shadow`. The `publisher` field in `package.json` must stay exactly `OmairSaad`.
+
 1. Push this repository to <https://github.com/OmairSaad/api-shadow> and make sure it's public, so the README images resolve.
-2. Sign in at <https://marketplace.visualstudio.com/manage> and create the publisher `omairsaad` if it doesn't exist yet. Its display name is what the Marketplace shows under the extension name.
-3. In Azure DevOps (<https://dev.azure.com>), create a Personal Access Token with **Organization: All accessible organizations** and **Scopes: Marketplace → Manage**.
-4. Log in and publish:
+2. Publish using one of these two options.
+
+   **Upload in the browser** (no token needed):
 
    ```bash
-   npx vsce login omairsaad
+   npm run package        # creates api-shadow-0.1.0.vsix
+   ```
+
+   Then open <https://marketplace.visualstudio.com/manage/publishers/OmairSaad>, choose **New extension → Visual Studio Code**, and upload the `.vsix`.
+
+   **Publish from the command line**: create an Azure DevOps Personal Access Token (<https://dev.azure.com> → User settings → Personal access tokens) with **Organization: All accessible organizations** and **Scopes: Marketplace → Manage**, then:
+
+   ```bash
+   npx vsce login OmairSaad
    npm run publish
    ```
 
-   To publish a new version later, update `CHANGELOG.md`, then run `npx vsce publish patch` (or `minor`/`major`). vsce bumps `package.json`, commits and tags the version, then publishes.
+3. The Marketplace verifies new extensions before listing them, which usually takes a few minutes.
 
-Alternatively, upload the `.vsix` from `npm run package` manually at <https://marketplace.visualstudio.com/manage>.
+To release a new version later, update `CHANGELOG.md` and bump `version` in `package.json` (`npm version patch`). Then either upload the new `.vsix` with **Update** on the extension's row in the publisher page, or run `npx vsce publish`.

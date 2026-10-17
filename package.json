@@ -3,7 +3,7 @@
   "displayName": "API Shadow",
   "description": "Automatically discover and explore API endpoints in Express, NestJS and Spring Boot projects using static analysis. Fully local.",
   "version": "0.1.0",
-  "publisher": "omairsaad",
+  "publisher": "OmairSaad",
   "license": "MIT",
   "author": {
     "name": "OmairSaad"
