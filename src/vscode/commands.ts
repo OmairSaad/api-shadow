@@ -1,12 +1,18 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { HTTP_METHODS, type AnalysisResult, type HttpMethod, type SourceLocation } from '../core/types';
+import { HTTP_METHODS, type AnalysisResult, type Endpoint, type HttpMethod, type SourceLocation } from '../core/types';
 import { GROUP_BY_VALUES, type GroupBy } from '../core/view';
 import { toMarkdown } from '../export/markdown';
 import { toOpenApi } from '../export/openapi';
+import { baseUrlFor, toCurl, toHttpFile } from '../export/requests';
 import type { AnalysisController } from './analysisController';
 import { relativePath, type EndpointTreeNode, type EndpointTreeProvider } from './endpointTree';
 import type { ChannelLogger } from './logger';
+
+/** Extensions that can send requests from `.http` files. */
+const HTTP_CLIENT_EXTENSIONS = ['humao.rest-client', 'anweber.vscode-httpyac'];
+const REST_CLIENT_URL = 'https://marketplace.visualstudio.com/items?itemName=humao.rest-client';
+const HINT_SHOWN_KEY = 'apiShadow.httpClientHintShown';
 
 const GROUP_LABELS: Record<GroupBy, string> = {
   controller: 'Controller / router file',
@@ -63,6 +69,56 @@ export function registerCommands(deps: CommandDeps): void {
   reg('apiShadow.copyMethodAndPath', async (node?: EndpointTreeNode) => {
     if (node?.type !== 'endpoint') return;
     await vscode.env.clipboard.writeText(`${node.endpoint.method} ${node.endpoint.path}`);
+  });
+
+  const baseUrl = (e: Endpoint): string => baseUrlFor(e, { baseUrl: controller.settings.requestsBaseUrl, servers: controller.current?.servers ?? [] });
+
+  // Request commands accept a tree node (context menu), an endpoint (CodeLens) or nothing
+  // (Command Palette, which asks for one).
+  reg('apiShadow.copyCurl', async (target?: EndpointTreeNode | Endpoint) => {
+    const e = endpointOf(target) ?? (await pickEndpoint(tree.allEndpoints(), 'Copy as cURL'));
+    if (!e) return;
+    const { command, warnings } = toCurl(e, baseUrl(e));
+    await vscode.env.clipboard.writeText(command);
+    if (warnings.length > 0) void vscode.window.showWarningMessage(`API Shadow: copied the cURL command. ${warnings.join(' ')}`);
+    else void vscode.window.setStatusBarMessage(`Copied cURL for ${e.method} ${e.path}`, 2500);
+    return command;
+  });
+
+  reg('apiShadow.openRequest', async (target?: EndpointTreeNode | Endpoint) => {
+    const e = endpointOf(target) ?? (await pickEndpoint(tree.allEndpoints(), 'Open as HTTP Request'));
+    if (!e) return;
+    const hasClient = HTTP_CLIENT_EXTENSIONS.some((id) => vscode.extensions.getExtension(id));
+    // The first line names the untitled tab.
+    const notes = hasClient ? [] : [`Send it with one click using the REST Client extension: ${REST_CLIENT_URL}`];
+    const doc = await openUntitled(toHttpFile([e], { title: `${e.method} ${e.path}`, notes, baseUrl }));
+    // Suggest the client once; the note in the file covers later requests.
+    if (!hasClient && !context.globalState.get<boolean>(HINT_SHOWN_KEY)) {
+      void context.globalState.update(HINT_SHOWN_KEY, true);
+      void vscode.window
+        .showInformationMessage('API Shadow: install the REST Client extension to send this request with one click.', 'Show REST Client', 'Copy as cURL Instead')
+        .then((choice) => {
+          if (choice === 'Show REST Client') void vscode.commands.executeCommand('extension.open', HTTP_CLIENT_EXTENSIONS[0]);
+          else if (choice) void vscode.commands.executeCommand('apiShadow.copyCurl', e);
+        });
+    }
+    return doc;
+  });
+
+  reg('apiShadow.endpointActions', async (target?: EndpointTreeNode | Endpoint) => {
+    const e = endpointOf(target);
+    if (!e) return;
+    const actions: (vscode.QuickPickItem & { run: () => unknown })[] = [
+      { label: '$(play) Try It', description: 'open a ready-to-send .http request', run: () => vscode.commands.executeCommand('apiShadow.openRequest', e) },
+      { label: '$(copy) Copy as cURL', run: () => vscode.commands.executeCommand('apiShadow.copyCurl', e) },
+      { label: '$(clippy) Copy Path', description: e.path, run: () => vscode.env.clipboard.writeText(e.path) },
+      { label: '$(clippy) Copy Method and Path', run: () => vscode.env.clipboard.writeText(`${e.method} ${e.path}`) },
+    ];
+    if (e.handlerLocation && (e.handlerLocation.file !== e.location.file || e.handlerLocation.line !== e.location.line)) {
+      actions.unshift({ label: '$(go-to-file) Go to Handler', description: e.handler, run: () => openLocation(e.handlerLocation) });
+    }
+    const pick = await vscode.window.showQuickPick(actions, { title: `${e.method} ${e.path}` });
+    await pick?.run();
   });
 
   reg('apiShadow.filter', async (text?: string) => {
@@ -125,21 +181,8 @@ export function registerCommands(deps: CommandDeps): void {
   });
 
   reg('apiShadow.search', async () => {
-    const endpoints = tree.allEndpoints();
-    if (endpoints.length === 0) {
-      void vscode.window.showInformationMessage('API Shadow: no endpoints discovered yet.');
-      return;
-    }
-    const pick = await vscode.window.showQuickPick(
-      endpoints.map((e) => ({
-        label: `${e.method} ${e.path}`,
-        description: [e.controller, e.handler].filter(Boolean).join(' · '),
-        detail: `${relativePath(e.location.file)}:${e.location.line}`,
-        endpoint: e,
-      })),
-      { title: 'Search API Endpoints', placeHolder: 'Type to search by method, path, handler or file', matchOnDescription: true, matchOnDetail: true },
-    );
-    if (pick) await openLocation(pick.endpoint.location);
+    const e = await pickEndpoint(tree.allEndpoints(), 'Search API Endpoints', 'Type to search by method, path, handler or file');
+    if (e) await openLocation(e.location);
   });
 
   reg('apiShadow.exportMarkdown', async (target?: vscode.Uri) => {
@@ -150,6 +193,22 @@ export function registerCommands(deps: CommandDeps): void {
     const md = toMarkdown(result, { title: `${workspaceTitle()} API Endpoints`, relativePath, includeSourceLocations: controller.settings.exportIncludeSourceLocations });
     await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(md));
     logger.info(`Exported Markdown to ${uri.fsPath}`);
+    await announceExport(uri, target === undefined);
+    return uri;
+  });
+
+  reg('apiShadow.exportHttp', async (target?: vscode.Uri) => {
+    const result = await requireResult(controller);
+    if (!result) return;
+    const uri = target instanceof vscode.Uri ? target : await saveTarget('api-requests.http', { 'HTTP requests': ['http', 'rest'] });
+    if (!uri) return;
+    const content = toHttpFile(result.endpoints, {
+      title: `${workspaceTitle()} API requests`,
+      baseUrl,
+      relativePath: controller.settings.exportIncludeSourceLocations ? relativePath : undefined,
+    });
+    await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(content));
+    logger.info(`Exported ${result.endpoints.length} request(s) to ${uri.fsPath}`);
     await announceExport(uri, target === undefined);
     return uri;
   });
@@ -169,6 +228,32 @@ export function registerCommands(deps: CommandDeps): void {
     await announceExport(uri, target === undefined);
     return uri;
   });
+}
+
+function endpointOf(target: EndpointTreeNode | Endpoint | undefined): Endpoint | undefined {
+  if (!target || typeof target !== 'object') return undefined;
+  if ('type' in target) return target.type === 'endpoint' ? target.endpoint : undefined;
+  return typeof target.method === 'string' && typeof target.path === 'string' ? target : undefined;
+}
+
+async function pickEndpoint(endpoints: Endpoint[], title: string, placeHolder = 'Choose an endpoint'): Promise<Endpoint | undefined> {
+  if (endpoints.length === 0) {
+    void vscode.window.showInformationMessage('API Shadow: no endpoints discovered yet.');
+    return undefined;
+  }
+  const pick = await vscode.window.showQuickPick(
+    endpoints.map((e) => ({ label: `${e.method} ${e.path}`, description: [e.controller, e.handler].filter(Boolean).join(' · '), detail: `${relativePath(e.location.file)}:${e.location.line}`, endpoint: e })),
+    { title, placeHolder, matchOnDescription: true, matchOnDetail: true },
+  );
+  return pick?.endpoint;
+}
+
+/** Opens generated content next to the code, like the Markdown preview. */
+async function openUntitled(content: string): Promise<vscode.TextDocument> {
+  const language = (await vscode.languages.getLanguages()).includes('http') ? 'http' : 'plaintext';
+  const doc = await vscode.workspace.openTextDocument({ language, content });
+  await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+  return doc;
 }
 
 async function requireResult(controller: AnalysisController): Promise<AnalysisResult | undefined> {

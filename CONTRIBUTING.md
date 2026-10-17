@@ -56,7 +56,7 @@ This packages the VSIX, installs it into a clean VS Code, opens a demo copy of t
 
 ```bash
 npm run package        # production build (vscode:prepublish), then vsce package
-code --install-extension api-shadow-0.1.0.vsix
+code --install-extension api-shadow-0.2.0.vsix
 ```
 
 `vsce` rewrites the relative image links in `README.md` to `https://github.com/OmairSaad/api-shadow/raw/HEAD/...`, using the `repository` field in `package.json`. The images therefore only display once this repository is public on GitHub with `media/` on its default branch.
@@ -71,7 +71,7 @@ The extension is published under the existing publisher **`OmairSaad`** (display
    **Upload in the browser** (no token needed):
 
    ```bash
-   npm run package        # creates api-shadow-0.1.0.vsix
+   npm run package        # creates api-shadow-0.2.0.vsix
    ```
 
    Then open <https://marketplace.visualstudio.com/manage/publishers/OmairSaad>, choose **New extension → Visual Studio Code**, and upload the `.vsix`.

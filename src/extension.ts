@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import type { AnalysisResult } from './core/types';
 import { GROUP_BY_VALUES, type GroupBy } from './core/view';
 import { AnalysisController } from './vscode/analysisController';
+import { EndpointCodeLensProvider } from './vscode/codeLens';
 import { registerCommands } from './vscode/commands';
 import { DuplicateDiagnostics } from './vscode/diagnostics';
 import { EndpointTreeProvider, type EndpointTreeNode } from './vscode/endpointTree';
@@ -30,6 +31,7 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
   const tree = new EndpointTreeProvider(groupBy);
   const issues = new IssuesTreeProvider();
   const diagnostics = new DuplicateDiagnostics();
+  const codeLens = new EndpointCodeLensProvider(() => controller.settings.codeLens);
 
   const endpointsView = vscode.window.createTreeView('apiShadow.endpoints', { treeDataProvider: tree, showCollapseAll: true });
   const issuesView = vscode.window.createTreeView('apiShadow.issues', { treeDataProvider: issues, showCollapseAll: true });
@@ -64,9 +66,10 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     } else {
       const n = result?.endpoints.length ?? 0;
       const dups = result?.duplicates.length ?? 0;
-      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${dups ? ` $(warning) ${dups}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
+      const noAuth = result?.issues.filter((i) => i.kind === 'no-auth').length ?? 0;
+      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${dups ? ` $(warning) ${dups}` : ''}${noAuth ? ` $(unlock) ${noAuth}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
       status.tooltip = result
-        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s). Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached).`
+        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s), ${noAuth} endpoint(s) without detected auth. Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached).`
         : 'API Shadow';
     }
     status.accessibilityInformation = { label: status.tooltip as string };
@@ -78,12 +81,15 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     tree,
     issues,
     diagnostics,
+    codeLens,
+    vscode.languages.registerCodeLensProvider({ scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java}' }, codeLens),
     endpointsView,
     issuesView,
     status,
     controller.onDidChangeResult((result) => {
       tree.setResult(result);
       issues.setResult(result);
+      codeLens.setResult(result);
       diagnostics.update(result, controller.settings.duplicateDiagnostics);
       updateViewState();
       updateStatus();

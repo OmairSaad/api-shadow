@@ -6,7 +6,7 @@
 import type { EndpointParameter, HttpMethod, PathExpr, ServiceCall } from '../core/types';
 
 /** Bump whenever the facts shape or extraction semantics change, to invalidate persisted caches. */
-export const FACTS_VERSION = 5;
+export const FACTS_VERSION = 6;
 
 export interface Pos {
   line: number;
@@ -125,6 +125,8 @@ export interface NestMethodFact {
   paths: PathExpr[];
   versions: string[];
   middleware: string[];
+  /** Decorators not imported from `@nestjs/*`, as written (`@Public()`, `@Roles('admin')`). */
+  markers: string[];
   params: NestParamFact[];
   bodyType?: string;
   serviceCalls: ServiceCall[];
@@ -136,6 +138,7 @@ export interface NestControllerFact {
   paths: PathExpr[];
   versions: string[];
   middleware: string[];
+  markers: string[];
   methods: NestMethodFact[];
   deps: Record<string, string>;
 }
@@ -151,6 +154,13 @@ export interface NestVersioningFact {
   type: 'URI' | 'HEADER' | 'MEDIA_TYPE' | 'CUSTOM' | 'UNKNOWN';
   prefix: string | false;
   defaultVersions: string[];
+  pos: Pos;
+}
+
+/** A guard applied to every route: `app.useGlobalGuards(new X())` or `{ provide: APP_GUARD, useClass: X }`. */
+export interface NestGlobalGuardFact {
+  name: string;
+  via: 'useGlobalGuards' | 'APP_GUARD';
   pos: Pos;
 }
 
@@ -182,6 +192,9 @@ export interface JsFileFacts {
   nestVersioning?: NestVersioningFact;
   nestModules: NestModuleFact[];
   nestRouterModule: NestRouterModuleRoute[];
+  nestGlobalGuards: NestGlobalGuardFact[];
+  /** Port from `app.listen(3000)` / `app.listen(process.env.PORT ?? 3000)`. */
+  listenPort?: { port: number; pos: Pos };
   issues: FileIssue[];
 }
 
@@ -231,6 +244,8 @@ export interface JavaFileFacts {
   classes: JavaClassFact[];
   /** `Class.CONSTANT` (and `Outer.Inner.CONSTANT`) -> expression */
   constants: Record<string, PathExpr>;
+  /** A class that configures Spring Security (`SecurityFilterChain` bean, `@EnableWebSecurity`, ...). */
+  securityConfig?: { className: string; pos: Pos };
   issues: FileIssue[];
 }
 
@@ -242,6 +257,7 @@ export interface SpringConfigFacts {
   lang: 'spring-config';
   contextPath?: string;
   servletPath?: string;
+  serverPort?: number;
   issues: FileIssue[];
 }
 

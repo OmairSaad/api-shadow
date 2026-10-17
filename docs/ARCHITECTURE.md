@@ -9,9 +9,9 @@ src/
   core/        Host-agnostic engine, data model, path utilities, filtering/grouping, duplicates, excludes
   analyzers/   Per-file fact extraction (Babel AST for JS/TS, java-parser CST for Java, Spring config)
   linkers/     Cross-file resolution: Express router graph, NestJS prefixes/modules, Spring mappings/constants
-  export/      Markdown and OpenAPI 3.0 writers
+  export/      Markdown, OpenAPI 3.0, cURL and .http writers
   vscode/      VS Code integration: file host, controller (watching, debouncing, cancellation, cache),
-               tree views, commands, diagnostics, config, logging
+               tree views, CodeLens, commands, diagnostics, config, logging
   extension.ts Activation; wires the above together and returns a small public API
 ```
 
@@ -30,7 +30,20 @@ FileHost.listFiles ──► kind + exclusion ──► per-file facts (cached) 
 1. **Discovery** (`VscodeFileHost.listFiles`): `workspace.findFiles` for sources (`js/ts/jsx/tsx/mjs/cjs/mts/cts/java/kt`), Spring config files (`application.{properties,yml,yaml}`) and project markers (`package.json`, `pom.xml`, `build.gradle[.kts]`). Dependency, build and VCS folders are excluded in the ripgrep query itself; user globs, `files.exclude`, and test patterns are applied with `PathExcluder`.
 2. **Per-file analysis** (`AnalysisEngine.ensure`): a file is re-read only when it is marked changed (watcher) or, on a full refresh, its `mtime`/`size` differ from the cache. A cheap regex pre-filter (`isJsCandidate`, `isJavaCandidate`) skips files that can't declare routes. Analyzers return **facts**: JSON-serialisable records with no source text (`analyzers/facts.ts`).
 3. **Linking**: linkers read facts only. When a linker needs a file the pre-filter skipped (an imported controller, a service, a `ApiPaths.java` constants class), it calls `LinkContext.getFacts`/`requestJavaClass`. The engine parses the requested files and links again (bounded to 4 rounds).
-4. **Post-processing**: duplicate detection (`core/duplicates.ts`), issue de-duplication, sorting.
+4. **Post-processing**: duplicate detection (`core/duplicates.ts`), auth classification (`core/auth.ts`), listening ports per project (`servers`), issue de-duplication, sorting.
+
+## Auth detection
+
+`core/auth.ts` classifies each endpoint after linking, from names only:
+
+- `public` when a middleware entry or marker matches `apiShadow.auth.publicPatterns` (`@Public()`, `@PermitAll`, `permitAll()`); this wins, because opt-outs exist to bypass a global guard.
+- `protected` when one matches `apiShadow.auth.patterns`.
+- `central` when the project has a Spring Security configuration class (`securityConfig` in the Java facts: a `SecurityFilterChain`/`SecurityWebFilterChain` bean, `@EnableWebSecurity`, or a `WebSecurityConfigurerAdapter` subclass). Per-path rules are not analyzed.
+- `none` otherwise.
+
+Markers are custom (non-`@nestjs`) decorators on Nest handlers and controllers, recorded without arguments. Global guards (`APP_GUARD` providers, `app.useGlobalGuards()`) are prepended to the middleware of every Nest endpoint in the project by the linker.
+
+`no-auth` issues are raised only in projects where at least one endpoint is not `none`, and by default (`sensitive`) only for write methods and admin/internal paths, never for sign-in, webhook, health or docs paths (`shouldWarn`). The default patterns deliberately leave out names that sound like auth but don't enforce it (`passport.initialize()`, helmet's `contentSecurityPolicy()`, `express-session`, `ThrottlerGuard`); `test/unit/auth.test.ts` pins both lists, and checks that `package.json` declares the same defaults.
 
 Facts are versioned with `FACTS_VERSION`. Bump it whenever extraction semantics change, so persisted caches are discarded.
 
@@ -80,6 +93,8 @@ Indexes classes by simple name and FQN, and constants by `Class.NAME` (plus ever
 - `AnalysisController`: owns the engine. File watchers mark changed files (or a structural change), then trigger a debounced refresh. `refresh()` cancels the in-flight run (`CancellationTokenSource`) and chains the new run after it, so runs never overlap. Results are published through an event. The facts cache is persisted to `context.storageUri` after a short delay.
 - `EndpointTreeProvider` / `IssuesTreeProvider`: native TreeViews (no webview). Every item has stable ids (expansion state survives refreshes), accessible labels, theme-colour method icons with the method also in text, and Markdown tooltips with `isTrusted = false`.
 - `DuplicateDiagnostics`: Problems-panel warnings with related locations.
+- `EndpointCodeLensProvider`: lenses above each endpoint's declaration line. Results come from the last analysis (on save); while a document is dirty, each lens follows the text of its original line within ±200 lines and is hidden if that text is gone.
+- Request commands (`copyCurl`, `openRequest`, `exportHttp`) use `export/requests.ts`. The base URL is the setting, else `http://localhost:<port>` from `result.servers` (`app.listen(...)` in JS facts, `server.port` in Spring config), else 3000/8080.
 - Commands accept optional arguments (`filter('text')`, `filterByMethod(['GET'])`, `groupBy('method')`, `exportMarkdown(uri)`) so they can be scripted and tested without UI. Without arguments they open quick inputs and dialogs.
 - `activate` returns `ApiShadowApi` (`getResult`, `refresh`, `whenIdle`, `onDidChangeResult`, tree access), used by the integration tests.
 
@@ -91,9 +106,9 @@ Everything the UI needs (hierarchy, icons, descriptions, tooltips, inline action
 
 | Suite | Runner | What it covers |
 |---|---|---|
-| `test/unit` | Vitest | analyzers and linkers on fixture projects and inline snippets, engine incrementality/cancellation/limits/cache, exporters (OpenAPI validated with swagger-parser), secrets never leaking, filtering, grouping, duplicates |
-| `test/integration` | Mocha in Extension Development Host (`@vscode/test-cli`) | activation, commands, tree contents, filters/grouping, navigation, diagnostics, exports, file watching, configuration changes |
-| `test/e2e` | Playwright `_electron` driving VS Code | real UI: activity bar, tree clicks, twisties, view toolbar, command palette, multi-select quick picks, keyboard navigation, Issues view, Problems panel, save dialog, live updates; saves screenshots |
+| `test/unit` | Vitest | analyzers and linkers on fixture projects and inline snippets, engine incrementality/cancellation/limits/cache, exporters (OpenAPI validated with swagger-parser), cURL and `.http` requests, auth detection and warnings, secrets never leaking, filtering, grouping, duplicates |
+| `test/integration` | Mocha in Extension Development Host (`@vscode/test-cli`) | activation, commands, tree contents, filters/grouping, navigation, diagnostics, exports, CodeLens, request commands, file watching, configuration changes |
+| `test/e2e` | Playwright `_electron` driving VS Code | real UI: activity bar, tree clicks, twisties, view toolbar, command palette, multi-select quick picks, keyboard navigation, Issues view, Problems panel, save dialog, clicking a CodeLens, live updates; saves screenshots |
 
 `scripts/screenshots/capture.spec.ts` reuses the UI test harness to generate the Marketplace images in `media/` (`npm run screenshots`).
 

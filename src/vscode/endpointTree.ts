@@ -1,12 +1,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { describeAuth } from '../core/auth';
 import type { AnalysisResult, Endpoint, HttpMethod, SourceLocation } from '../core/types';
 import { EMPTY_FILTER, groupEndpoints, isFilterActive, matchesFilter, type EndpointFilter, type GroupBy } from '../core/view';
 
 export type EndpointTreeNode =
   | { type: 'group'; key: string; label: string; description?: string; endpoints: Endpoint[] }
-  | { type: 'endpoint'; endpoint: Endpoint; duplicate: boolean }
-  | { type: 'detail'; id: string; label: string; description?: string; icon: string; tooltip?: string; location?: SourceLocation };
+  | { type: 'endpoint'; endpoint: Endpoint; duplicate: boolean; noAuth: boolean }
+  | { type: 'detail'; id: string; label: string; description?: string; icon: string; color?: string; tooltip?: string; location?: SourceLocation };
 
 const METHOD_COLORS: Record<HttpMethod, string> = {
   GET: 'charts.green',
@@ -30,6 +31,7 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
   readonly onDidChangeTreeData = this.emitter.event;
   private result: AnalysisResult | undefined;
   private duplicateIds = new Set<string>();
+  private noAuthIds = new Set<string>();
   private filterState: EndpointFilter = EMPTY_FILTER;
   private groupMode: GroupBy;
 
@@ -48,6 +50,7 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
   setResult(result: AnalysisResult): void {
     this.result = result;
     this.duplicateIds = new Set(result.duplicates.flatMap((d) => d.endpointIds));
+    this.noAuthIds = new Set(result.issues.filter((i) => i.kind === 'no-auth').flatMap((i) => i.endpointIds ?? []));
     this.emitter.fire(undefined);
   }
 
@@ -86,7 +89,7 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
       }));
     }
     if (node.type === 'group') return node.endpoints.map((e) => this.endpointNode(e));
-    if (node.type === 'endpoint') return this.details(node.endpoint, node.duplicate);
+    if (node.type === 'endpoint') return this.details(node.endpoint, node.duplicate, node.noAuth);
     return [];
   }
 
@@ -95,13 +98,30 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
   }
 
   private endpointNode(endpoint: Endpoint): EndpointTreeNode {
-    return { type: 'endpoint', endpoint, duplicate: this.duplicateIds.has(endpoint.id) };
+    return { type: 'endpoint', endpoint, duplicate: this.duplicateIds.has(endpoint.id), noAuth: this.noAuthIds.has(endpoint.id) };
   }
 
-  private details(e: Endpoint, duplicate: boolean): EndpointTreeNode[] {
+  private details(e: Endpoint, duplicate: boolean, noAuth: boolean): EndpointTreeNode[] {
     const out: EndpointTreeNode[] = [];
     if (duplicate) {
       out.push({ type: 'detail', id: `${e.id}:dup`, label: 'Potential duplicate route', icon: 'warning', tooltip: 'Another endpoint in this project matches the same method and path. See the Issues view.' });
+    }
+    if (e.auth) {
+      const label = `Auth: ${describeAuth(e.auth)}`;
+      out.push({
+        type: 'detail',
+        id: `${e.id}:auth`,
+        label,
+        icon: noAuth ? 'warning' : e.auth.status === 'none' || e.auth.status === 'public' ? 'unlock' : 'shield',
+        color: noAuth ? 'list.warningForeground' : undefined,
+        description: e.auth.location ? `${path.basename(e.auth.location.file)}:${e.auth.location.line}` : undefined,
+        tooltip: noAuth
+          ? `${label}. Other endpoints in this project use auth middleware, guards or security annotations; this one has none.`
+          : e.auth.status === 'central'
+            ? `${label}. Per-path rules in the security configuration are not analyzed.`
+            : label,
+        location: e.auth.location,
+      });
     }
     if (e.handlerLocation) {
       out.push({
@@ -159,12 +179,12 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
         return item;
       }
       case 'endpoint':
-        return this.endpointItem(node.endpoint, node.duplicate);
+        return this.endpointItem(node.endpoint, node.duplicate, node.noAuth);
       case 'detail': {
         const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.None);
         item.id = node.id;
         item.description = node.description;
-        item.iconPath = new vscode.ThemeIcon(node.icon);
+        item.iconPath = new vscode.ThemeIcon(node.icon, node.color ? new vscode.ThemeColor(node.color) : undefined);
         item.tooltip = node.tooltip ?? node.label;
         item.contextValue = 'apiShadow.detail';
         item.accessibilityInformation = { label: node.description ? `${node.label}, ${node.description}` : node.label };
@@ -176,27 +196,27 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     }
   }
 
-  private endpointItem(e: Endpoint, duplicate: boolean): vscode.TreeItem {
+  private endpointItem(e: Endpoint, duplicate: boolean, noAuth: boolean): vscode.TreeItem {
     const label = `${e.method} ${e.path}`;
-    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length > 0 || !!e.handlerLocation || !!e.requestBodyType || duplicate;
+    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length > 0 || !!e.handlerLocation || !!e.requestBodyType || !!e.auth || duplicate;
     const item = new vscode.TreeItem({ label, highlights: [[0, e.method.length]] }, hasDetails ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     item.id = `endpoint:${e.id}`;
     const where = `${path.basename(e.location.file)}:${e.location.line}`;
-    item.description = [e.handler, where, duplicate ? 'duplicate' : undefined, e.pathIsStatic ? undefined : 'dynamic'].filter(Boolean).join(' · ');
+    item.description = [e.handler, where, duplicate ? 'duplicate' : undefined, noAuth ? 'no auth' : undefined, e.pathIsStatic ? undefined : 'dynamic'].filter(Boolean).join(' · ');
     item.iconPath = duplicate
       ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
       : new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor(METHOD_COLORS[e.method]));
     item.contextValue = 'apiShadow.endpoint';
     item.command = { command: 'apiShadow.openLocation', title: 'Go to Endpoint', arguments: [e.location, true] };
-    item.tooltip = this.tooltip(e, duplicate);
+    item.tooltip = this.tooltip(e, duplicate, noAuth);
     item.accessibilityInformation = {
-      label: `${e.method} ${e.path}, ${FRAMEWORK_LABEL[e.framework]}${e.handler ? `, handler ${e.handler}` : ''}, ${where}${duplicate ? ', potential duplicate' : ''}`,
+      label: `${e.method} ${e.path}, ${FRAMEWORK_LABEL[e.framework]}${e.handler ? `, handler ${e.handler}` : ''}, ${where}${duplicate ? ', potential duplicate' : ''}${noAuth ? ', no auth found' : ''}`,
       role: 'treeitem',
     };
     return item;
   }
 
-  private tooltip(e: Endpoint, duplicate: boolean): vscode.MarkdownString {
+  private tooltip(e: Endpoint, duplicate: boolean, noAuth: boolean): vscode.MarkdownString {
     const md = new vscode.MarkdownString(undefined, false);
     md.isTrusted = false;
     md.supportHtml = false;
@@ -210,7 +230,9 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     row('Source', `${relativePath(e.location.file)}:${e.location.line}`);
     if (e.middleware.length) row('Middleware', e.middleware.join(', '));
     if (e.services.length) row('Services', e.services.map((s) => s.name).join(', '));
+    if (e.auth) row('Auth', describeAuth(e.auth) ?? '');
     if (duplicate) row('Warning', 'potential duplicate route');
+    if (noAuth) row('Warning', 'no auth found, but other endpoints in this project have it');
     for (const n of e.notes) md.appendMarkdown('- ').appendText(n).appendMarkdown('\n');
     return md;
   }

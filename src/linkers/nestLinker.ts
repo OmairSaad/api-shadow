@@ -1,9 +1,10 @@
 /**
  * Expands NestJS controllers into endpoints. Applies, per project root:
  * `app.setGlobalPrefix()` (with `exclude`), URI versioning (`enableVersioning` + `@Version` /
- * controller `version`), and `RouterModule.register()` module prefixes.
+ * controller `version`), `RouterModule.register()` module prefixes and global guards
+ * (`app.useGlobalGuards()`, `APP_GUARD` providers).
  */
-import type { JsFileFacts, NestGlobalPrefixFact, NestRouterModuleRoute, NestVersioningFact } from '../analyzers/facts';
+import type { JsFileFacts, NestGlobalGuardFact, NestGlobalPrefixFact, NestRouterModuleRoute, NestVersioningFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths, lit } from '../core/paths';
 import type { Endpoint, HttpMethod, PathExpr, ServiceRef, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
@@ -15,6 +16,7 @@ interface ProjectConfig {
   modulePrefixes: Map<string, string>;
   /** controller class -> module names */
   controllerModules: Map<string, string[]>;
+  globalGuards: { fact: NestGlobalGuardFact; file: string }[];
 }
 
 export class NestLinker {
@@ -27,7 +29,7 @@ export class NestLinker {
     const configFor = (root: string): ProjectConfig => {
       let c = configs.get(root);
       if (!c) {
-        c = { modulePrefixes: new Map(), controllerModules: new Map() };
+        c = { modulePrefixes: new Map(), controllerModules: new Map(), globalGuards: [] };
         configs.set(root, c);
       }
       return c;
@@ -50,6 +52,7 @@ export class NestLinker {
           this.ctx.issue('info', 'Versioning type could not be determined; version prefixes are not applied.', file, facts.nestVersioning.pos);
         }
       }
+      for (const fact of facts.nestGlobalGuards) config.globalGuards.push({ fact, file });
       for (const mod of facts.nestModules) {
         for (const c of mod.controllers) {
           const list = config.controllerModules.get(c) ?? [];
@@ -71,6 +74,9 @@ export class NestLinker {
     for (const [file, facts] of files) {
       const root = this.ctx.projectRootOf(file);
       const config = configFor(root);
+      // Global guards run before controller and method guards.
+      const globalGuards = config.globalGuards.map((g) => `${g.fact.via}(${g.fact.name})`);
+      const guardNotes = config.globalGuards.map((g) => `Global guard ${g.fact.name} (${g.fact.via}, ${shortFile(g.file)}:${g.fact.pos.line})`);
       for (const controller of facts.nestControllers) {
         const modules = config.controllerModules.get(controller.className) ?? [];
         const modulePrefix = modules.map((m) => config.modulePrefixes.get(m)).find((p) => p !== undefined);
@@ -84,7 +90,7 @@ export class NestLinker {
           for (const cPath of controller.paths) {
             for (const mPath of method.paths) {
               for (const version of uriVersions) {
-                const notes: string[] = [];
+                const notes: string[] = [...guardNotes];
                 const routeOnly = joinUrlPaths(exprToDisplay(cPath), exprToDisplay(mPath));
                 const exprs: PathExpr[] = [];
                 const prefix = config.prefix;
@@ -120,7 +126,8 @@ export class NestLinker {
                   handler: method.name,
                   location,
                   handlerLocation: callable ? loc(file, callable.pos) : undefined,
-                  middleware: [...controller.middleware, ...method.middleware],
+                  middleware: [...new Set([...globalGuards, ...controller.middleware, ...method.middleware])],
+                  markers: [...new Set([...controller.markers, ...method.markers])],
                   services: this.services(file, facts, method.serviceCalls),
                   parameters: method.params.map(({ name, in: where, required, type }) => ({ name, in: where, required, type })),
                   requestBodyType: method.bodyType,

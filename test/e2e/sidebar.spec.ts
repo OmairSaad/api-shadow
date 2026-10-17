@@ -199,6 +199,25 @@ test('exports Markdown through the save dialog', async () => {
   await screenshot('09-export');
 });
 
+test('CodeLens shows auth above the handler and Try it opens a request beside the code', async () => {
+  await filterTo('/api/v1/users');
+  await endpointsTree().getByRole('treeitem', { name: /^POST \/api\/v1\/users, NestJS/ }).click();
+  const activeGroup = page.locator('.editor-group-container.active');
+  await expect(activeGroup.locator('.tab.active')).toContainText('users.controller.ts');
+  const lens = activeGroup.locator('.codelens-decoration').filter({ hasText: 'POST /api/v1/users' });
+  await expect(lens).toContainText('AuthGuard, RolesGuard');
+  // A reopened file first shows cached lenses as plain text; wait for the live, clickable ones.
+  await lens.locator('a[role="button"]', { hasText: 'Try it' }).click();
+  await expect(page.locator('.editor-group-container.active .tab.active')).toContainText('Untitled');
+  await expect(page.locator('.editor-group-container.active .view-lines')).toContainText('POST {{baseUrl}}/api/v1/users');
+  await expect(page.locator('.editor-group-container')).toHaveCount(2);
+  await screenshot('10-codelens-request');
+  await runCommand(page, 'View: Revert and Close Editor');
+  await runCommand(page, 'Notifications: Clear All Notifications');
+  await expect(page.locator('.editor-group-container')).toHaveCount(1);
+  await clearFilter();
+});
+
 test('updates the sidebar when a route file changes on disk', async () => {
   const file = path.join(session.workspace, 'express-app', 'src', 'routes', 'admin.ts');
   const original = fs.readFileSync(file, 'utf8');

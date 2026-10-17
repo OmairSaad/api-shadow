@@ -74,7 +74,7 @@ describe('API Shadow extension (Extension Development Host)', function () {
 
   it('registers all contributed commands', async function () {
     const commands = await vscode.commands.getCommands(true);
-    for (const id of ['refresh', 'search', 'filter', 'filterByMethod', 'clearFilter', 'groupBy', 'exportMarkdown', 'exportOpenApi', 'clearCache', 'showLog', 'openLocation', 'openHandler', 'copyPath']) {
+    for (const id of ['refresh', 'search', 'filter', 'filterByMethod', 'clearFilter', 'groupBy', 'exportMarkdown', 'exportOpenApi', 'exportHttp', 'clearCache', 'showLog', 'openLocation', 'openHandler', 'copyPath', 'copyCurl', 'openRequest', 'endpointActions']) {
       assert.ok(commands.includes(`apiShadow.${id}`), `apiShadow.${id}`);
     }
   });
@@ -170,6 +170,65 @@ describe('API Shadow extension (Extension Development Host)', function () {
       await config.update('frameworks', undefined, vscode.ConfigurationTarget.Workspace);
     }
     await waitForResult(api, (x) => new Set(x.endpoints.map((e) => e.framework)).size === 3);
+  });
+
+  it('shows CodeLens with method, path, auth and request actions above endpoints', async function () {
+    const users = vscode.Uri.file(path.join(workspaceRoot(), 'nest-app', 'src', 'users', 'users.controller.ts'));
+    await vscode.window.showTextDocument(users);
+    const lenses = (await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', users)) ?? [];
+    const create = api.getResult()!.endpoints.find((e) => e.method === 'POST' && e.path === '/api/v1/users')!;
+    const titles = lenses.filter((l) => l.range.start.line === create.location.line - 1).map((l) => l.command?.title);
+    assert.deepStrictEqual(titles, ['POST /api/v1/users', '$(shield) AuthGuard, RolesGuard', '$(play) Try it', '$(copy) cURL'], JSON.stringify(titles));
+    const commands = lenses.filter((l) => l.range.start.line === create.location.line - 1).map((l) => l.command?.command);
+    assert.deepStrictEqual(commands, ['apiShadow.endpointActions', '', 'apiShadow.openRequest', 'apiShadow.copyCurl']);
+
+    const admin = vscode.Uri.file(path.join(workspaceRoot(), 'nest-app', 'src', 'admin', 'admin.controller.ts'));
+    await vscode.workspace.openTextDocument(admin);
+    const adminLenses = (await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', admin)) ?? [];
+    assert.ok(adminLenses.some((l) => l.command?.title === '$(warning) No auth found'));
+
+    await vscode.workspace.getConfiguration('apiShadow').update('codeLens.enabled', false, vscode.ConfigurationTarget.Workspace);
+    try {
+      await api.whenIdle();
+      const none = (await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', users)) ?? [];
+      assert.ok(!none.some((l) => l.command?.title === '$(play) Try it'));
+    } finally {
+      await vscode.workspace.getConfiguration('apiShadow').update('codeLens.enabled', undefined, vscode.ConfigurationTarget.Workspace);
+    }
+    await api.whenIdle();
+  });
+
+  it('copies cURL commands and opens .http requests', async function () {
+    const create = api.getResult()!.endpoints.find((e) => e.method === 'POST' && e.path === '/api/v1/users')!;
+    await vscode.commands.executeCommand('apiShadow.copyCurl', create);
+    const curl = await vscode.env.clipboard.readText();
+    assert.ok(curl.startsWith("curl -X POST 'http://localhost:3000/api/v1/users'"), curl);
+    assert.ok(curl.includes('Authorization: Bearer $TOKEN'), curl);
+
+    const doc = await vscode.commands.executeCommand<vscode.TextDocument>('apiShadow.openRequest', create);
+    assert.ok(doc?.isUntitled);
+    assert.match(doc.getText(), /^@baseUrl = http:\/\/localhost:3000$/m);
+    assert.match(doc.getText(), /^POST \{\{baseUrl\}\}\/api\/v1\/users$/m);
+    await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  });
+
+  it('exports every endpoint as .http requests', async function () {
+    const target = vscode.Uri.file(path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'api-shadow-http-')), 'api.http'));
+    await vscode.commands.executeCommand('apiShadow.exportHttp', target);
+    const text = fs.readFileSync(target.fsPath, 'utf8');
+    assert.match(text, /^@baseUrl = http:\/\/localhost:\d+$/m);
+    assert.strictEqual((text.match(/^### /gm) ?? []).length, api.getResult()!.endpoints.length);
+    assert.ok(text.includes('GET {{baseUrl2}}/shop/api/orders/{{orderId}}') || text.includes('GET {{baseUrl}}/shop/api/orders/{{orderId}}'), text);
+  });
+
+  it('shows auth in the tree and lists endpoints without auth in the Issues view', function () {
+    const result = api.getResult()!;
+    const noAuth = result.issues.filter((i) => i.kind === 'no-auth');
+    assert.ok(noAuth.some((i) => i.message.startsWith('No auth found for POST /api/orders')), JSON.stringify(noAuth.map((i) => i.message)));
+    const users = api.getTreeChildren().find((r) => r.type === 'group' && r.label === 'UsersController')!;
+    const create = api.getTreeChildren(users).find((n) => n.type === 'endpoint' && n.endpoint.method === 'POST')!;
+    const details = api.getTreeChildren(create).map((d) => (d.type === 'detail' ? d.label : ''));
+    assert.ok(details.includes('Auth: UseGuards(AuthGuard), UseGuards(RolesGuard)'), details.join('\n'));
   });
 
   it('lists analysis limitations', function () {

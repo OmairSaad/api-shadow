@@ -7,6 +7,7 @@ export type IssueTreeNode = { type: 'section'; kind: IssueKind; issues: Analysis
 
 const SECTIONS: { kind: IssueKind; label: string; icon: string }[] = [
   { kind: 'duplicate', label: 'Potential duplicate routes', icon: 'warning' },
+  { kind: 'no-auth', label: 'Endpoints without detected auth', icon: 'unlock' },
   { kind: 'parse-error', label: 'Parse errors', icon: 'error' },
   { kind: 'limitation', label: 'Analysis limitations', icon: 'info' },
   { kind: 'skipped', label: 'Skipped files', icon: 'circle-slash' },
@@ -37,7 +38,8 @@ export class IssuesTreeProvider implements vscode.TreeDataProvider<IssueTreeNode
   getTreeItem(node: IssueTreeNode): vscode.TreeItem {
     if (node.type === 'section') {
       const meta = SECTIONS.find((s) => s.kind === node.kind)!;
-      const item = new vscode.TreeItem(meta.label, node.kind === 'duplicate' || node.kind === 'parse-error' ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
+      const expanded = node.kind === 'duplicate' || node.kind === 'parse-error' || (node.kind === 'no-auth' && node.issues.length <= 10);
+      const item = new vscode.TreeItem(meta.label, expanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `section:${node.kind}`;
       item.description = String(node.issues.length);
       item.iconPath = new vscode.ThemeIcon(meta.icon);

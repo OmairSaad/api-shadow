@@ -1,13 +1,14 @@
 /**
- * Reads only `server.servlet.context-path` and `spring.mvc.servlet.path` from Spring Boot
- * configuration files. No other value is retained, logged or exported: configuration files
- * frequently contain credentials.
+ * Reads only `server.servlet.context-path`, `spring.mvc.servlet.path` and `server.port` from
+ * Spring Boot configuration files. No other value is retained, logged or exported: configuration
+ * files frequently contain credentials.
  */
 import { parse as parseYaml } from 'yaml';
 import type { SpringConfigFacts } from './facts';
 
 const CONTEXT_KEYS = ['server.servlet.context-path', 'server.servlet.contextPath', 'server.context-path'];
 const SERVLET_KEYS = ['spring.mvc.servlet.path', 'spring.mvc.servlet-path'];
+const PORT_KEYS = ['server.port'];
 
 export function isSpringConfigFile(filePath: string): boolean {
   return /(^|[\\/])application\.(properties|ya?ml)$/i.test(filePath);
@@ -18,6 +19,9 @@ export function analyzeSpringConfig(source: string, filePath: string): SpringCon
   const values = filePath.toLowerCase().endsWith('.properties') ? readProperties(source) : readYaml(source, facts);
   facts.contextPath = pick(values, CONTEXT_KEYS);
   facts.servletPath = pick(values, SERVLET_KEYS);
+  // Placeholders such as `${PORT:8081}` keep their default.
+  const port = /^(?:\$\{[^:}]+:)?(\d{1,5})\}?$/.exec(pick(values, PORT_KEYS) ?? '');
+  if (port && Number(port[1]) > 0 && Number(port[1]) < 65536) facts.serverPort = Number(port[1]);
   if (facts.contextPath?.includes('${') || facts.servletPath?.includes('${')) {
     facts.issues.push({
       kind: 'limitation',
@@ -39,7 +43,7 @@ function pick(values: Map<string, string>, keys: string[]): string | undefined {
 }
 
 function readProperties(source: string): Map<string, string> {
-  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS]);
+  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS]);
   const out = new Map<string, string>();
   for (const raw of source.split(/\r?\n/)) {
     const line = raw.trim();
@@ -51,7 +55,7 @@ function readProperties(source: string): Map<string, string> {
 }
 
 function readYaml(source: string, facts: SpringConfigFacts): Map<string, string> {
-  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS]);
+  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS]);
   const out = new Map<string, string>();
   // Multi-document YAML: only the first (default profile) document is considered.
   const firstDoc = source.split(/^---\s*$/m)[0];

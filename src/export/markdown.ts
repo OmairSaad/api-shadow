@@ -65,7 +65,20 @@ export function toMarkdown(result: AnalysisResult, options: ExportOptions): stri
     lines.push('');
   }
 
-  const limitations = result.issues.filter((i) => i.kind !== 'duplicate');
+  const noAuth = result.issues.filter((i) => i.kind === 'no-auth');
+  if (noAuth.length > 0) {
+    lines.push('## Endpoints without detected auth', '');
+    lines.push('Other endpoints in the same project use auth middleware, guards or security annotations; these do not.', '');
+    const byId = new Map(result.endpoints.map((e) => [e.id, e]));
+    for (const i of noAuth) {
+      const e = byId.get(i.endpointIds?.[0] ?? '');
+      if (!e) continue;
+      lines.push(`- ${e.method} ${code(e.path)}` + (includeLoc ? ` — ${options.relativePath(e.location.file)}:${e.location.line}` : ''));
+    }
+    lines.push('');
+  }
+
+  const limitations = result.issues.filter((i) => i.kind !== 'duplicate' && i.kind !== 'no-auth');
   if (limitations.length > 0) {
     lines.push('## Analysis notes and limitations', '');
     for (const i of limitations) {

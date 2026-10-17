@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { AUTH_WARNING_VALUES, DEFAULT_AUTH_PATTERNS, DEFAULT_PUBLIC_PATTERNS, type AuthOptions, type AuthWarnings } from '../core/auth';
 import type { GroupBy } from '../core/view';
 import { GROUP_BY_VALUES } from '../core/view';
 import type { Framework } from '../core/types';
@@ -18,6 +19,9 @@ export interface ApiShadowConfig {
   springApplyContextPath: boolean;
   persistCache: boolean;
   exportIncludeSourceLocations: boolean;
+  auth: AuthOptions;
+  codeLens: boolean;
+  requestsBaseUrl: string;
 }
 
 const ALL_FRAMEWORKS: Framework[] = ['express', 'nestjs', 'spring'];
@@ -26,6 +30,7 @@ export function readConfig(): ApiShadowConfig {
   const c = vscode.workspace.getConfiguration('apiShadow');
   const frameworks = c.get<string[]>('frameworks', ALL_FRAMEWORKS).filter((f): f is Framework => (ALL_FRAMEWORKS as string[]).includes(f));
   const groupBy = c.get<string>('groupBy', 'controller');
+  const warnings = c.get<string>('auth.warnings', 'sensitive');
   return {
     frameworks: new Set(frameworks),
     exclude: c.get<string[]>('exclude', []),
@@ -41,7 +46,19 @@ export function readConfig(): ApiShadowConfig {
     springApplyContextPath: c.get<boolean>('spring.applyContextPath', true),
     persistCache: c.get<boolean>('persistCache', true),
     exportIncludeSourceLocations: c.get<boolean>('export.includeSourceLocations', true),
+    auth: {
+      enabled: c.get<boolean>('auth.enabled', true),
+      warnings: (AUTH_WARNING_VALUES as string[]).includes(warnings) ? (warnings as AuthWarnings) : 'sensitive',
+      patterns: stringList(c.get<unknown>('auth.patterns'), DEFAULT_AUTH_PATTERNS),
+      publicPatterns: stringList(c.get<unknown>('auth.publicPatterns'), DEFAULT_PUBLIC_PATTERNS),
+    },
+    codeLens: c.get<boolean>('codeLens.enabled', true),
+    requestsBaseUrl: c.get<string>('requests.baseUrl', ''),
   };
+}
+
+function stringList(value: unknown, fallback: readonly string[]): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string' && v.trim() !== '') : [...fallback];
 }
 
 function clamp(value: number, min: number, max: number): number {

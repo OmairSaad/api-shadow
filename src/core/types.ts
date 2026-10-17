@@ -62,6 +62,23 @@ export interface EndpointParameter {
   type?: string;
 }
 
+/**
+ * How an endpoint is protected, as far as the code shows:
+ * - `protected`: middleware, a guard or a security annotation that looks like authentication or authorization
+ * - `public`: an explicit opt-out marker (`@Public()`, `@PermitAll`, `permitAll()`)
+ * - `central`: the project configures security centrally (Spring Security filter chain); per-path rules aren't analyzed
+ * - `none`: nothing auth-related was found
+ */
+export type AuthStatus = 'protected' | 'public' | 'central' | 'none';
+
+export interface EndpointAuth {
+  status: AuthStatus;
+  /** The middleware, guards, markers or configuration class that decided the status. */
+  via: string[];
+  /** Where central security is configured (`central` only). */
+  location?: SourceLocation;
+}
+
 export interface Endpoint {
   id: string;
   framework: Framework;
@@ -75,6 +92,10 @@ export interface Endpoint {
   location: SourceLocation;
   handlerLocation?: SourceLocation;
   middleware: string[];
+  /** Custom decorators on the handler or controller (NestJS), e.g. `@Public()`. Used for auth detection. */
+  markers?: string[];
+  /** Filled in after linking; see {@link EndpointAuth}. */
+  auth?: EndpointAuth;
   services: ServiceRef[];
   parameters: EndpointParameter[];
   /** Source-level request body type name (Nest `@Body()`, Spring `@RequestBody`). */
@@ -85,7 +106,7 @@ export interface Endpoint {
   projectRoot: string;
 }
 
-export type IssueKind = 'duplicate' | 'limitation' | 'parse-error' | 'skipped';
+export type IssueKind = 'duplicate' | 'no-auth' | 'limitation' | 'parse-error' | 'skipped';
 export type IssueSeverity = 'info' | 'warning' | 'error';
 
 export interface AnalysisIssue {
@@ -113,10 +134,18 @@ export interface AnalysisStats {
   truncated: boolean;
 }
 
+/** A port a project listens on, read from `app.listen(3000)` or `server.port`. */
+export interface ServerInfo {
+  projectRoot: string;
+  port: number;
+  location: SourceLocation;
+}
+
 export interface AnalysisResult {
   endpoints: Endpoint[];
   issues: AnalysisIssue[];
   duplicates: DuplicateGroup[];
+  servers: ServerInfo[];
   stats: AnalysisStats;
 }
 

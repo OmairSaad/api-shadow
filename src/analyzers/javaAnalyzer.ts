@@ -20,11 +20,14 @@ const MAPPING_ANNOTATIONS: Record<string, HttpMethod | undefined> = {
 
 const SECURITY_ANNOTATIONS = new Set(['PreAuthorize', 'PostAuthorize', 'Secured', 'RolesAllowed', 'PermitAll', 'DenyAll']);
 const CONTROLLER_ANNOTATIONS = new Set(['RestController', 'Controller']);
+/** Signs that a class configures Spring Security for the whole application. */
+const SECURITY_CONFIG_ANNOTATIONS = new Set(['EnableWebSecurity', 'EnableWebFluxSecurity']);
+const SECURITY_CONFIG_TYPES = new Set(['SecurityFilterChain', 'SecurityWebFilterChain', 'WebSecurityConfigurerAdapter']);
 const REQUEST_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
 
 /** Quick textual check used to decide whether a Java file is worth parsing in the first pass. */
 export function isJavaCandidate(source: string): boolean {
-  return /@(Rest)?Controller\b|Mapping\b/.test(source);
+  return /@(Rest)?Controller\b|Mapping\b|SecurityFilterChain\b|SecurityWebFilterChain\b|EnableWeb(Flux)?Security\b|WebSecurityConfigurerAdapter\b/.test(source);
 }
 
 function isToken(el: CstElement): el is IToken {
@@ -336,6 +339,9 @@ class JavaWalker {
       methods: [],
     };
     this.facts.classes.push(cls);
+    if (annotations.some((a) => SECURITY_CONFIG_ANNOTATIONS.has(a.name)) || cls.extends.some((e) => SECURITY_CONFIG_TYPES.has(e))) {
+      this.facts.securityConfig ??= { className: name, pos: tokenPos(nameTok) };
+    }
     const body = kid(normal, 'classBody');
     for (const decl of kidNodes(body, 'classBodyDeclaration')) {
       const member = kid(decl, 'classMemberDeclaration');
@@ -426,6 +432,8 @@ class JavaWalker {
     const nameTok = directTokens(declarator, 'Identifier')[0];
     if (!nameTok) return;
     const mappingAnn = annotations.find((a) => a.name in MAPPING_ANNOTATIONS);
+    const returnType = simpleTypeName(kid(header, 'result'));
+    if (returnType && SECURITY_CONFIG_TYPES.has(returnType)) this.facts.securityConfig ??= { className: cls.name, pos: tokenPos(nameTok) };
     const params: EndpointParameter[] = [];
     let bodyType: string | undefined;
     for (const fp of kidNodes(kid(declarator, 'formalParameterList'), 'formalParameter')) {

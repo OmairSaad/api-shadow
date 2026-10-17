@@ -63,7 +63,7 @@ const SERVICE_SOURCE = /(\/|^)(services?|repositor(y|ies)|daos?|use-?cases?|prov
 
 /** Quick textual check used to decide whether a file is worth parsing. */
 export function isJsCandidate(source: string): boolean {
-  return /express|@nestjs\/|Router\s*\(|\.use\s*\(|\.(get|post|put|patch|delete|all)\s*\(\s*['"`/]/.test(source);
+  return /express|@nestjs\/|Router\s*\(|\.use\s*\(|\.listen\s*\(|\.(get|post|put|patch|delete|all)\s*\(\s*['"`/]/.test(source);
 }
 
 type Binding =
@@ -115,6 +115,7 @@ class JsAnalyzer {
     nestControllers: [],
     nestModules: [],
     nestRouterModule: [],
+    nestGlobalGuards: [],
     issues: [],
   };
   private readonly fileScope = new Scope();
@@ -132,6 +133,8 @@ class JsAnalyzer {
   private classStack: ClassContext[] = [];
   /** Routers created inline without a variable (`Router().use(...)`), keyed by AST node. */
   private readonly anonymousRouters = new Map<Node, string>();
+  /** Constants that evaluate to a port number (`const PORT = process.env.PORT || 3000`). */
+  private readonly portConsts = new Map<string, number>();
 
   constructor(
     private readonly source: string,
@@ -313,6 +316,8 @@ class JsAnalyzer {
       if (!scope.hasOwn(name)) scope.set(name, { kind: 'shadow' });
       return;
     }
+    const port = this.portValue(init);
+    if (port !== undefined) this.portConsts.set(name, port);
     const src = this.requireSource(init);
     if (src) {
       this.addImport(name, src, '*cjs');
@@ -724,6 +729,8 @@ class JsAnalyzer {
         if (prop === 'use' && this.handleUse(node, callee, scope)) return;
         if (this.usesNest && prop === 'setGlobalPrefix') this.handleGlobalPrefix(node, scope);
         if (this.usesNest && prop === 'enableVersioning') this.handleVersioning(node);
+        if (this.usesNest && prop === 'useGlobalGuards') this.handleGlobalGuards(node);
+        if (prop === 'listen' && !this.facts.listenPort) this.handleListen(node, callee, scope);
         if (this.usesNest && (prop === 'register' || prop === 'forRoutes') && memberText(callee.object) === 'RouterModule') {
           this.handleRouterModule(node);
         }
@@ -1171,9 +1178,14 @@ class JsAnalyzer {
     let controller: NestControllerFact | undefined;
     const middleware: string[] = [];
     let versions: string[] = [];
+    const markers: string[] = [];
     for (const dec of decorators) {
       const d = this.nestDecorator(dec.expression);
-      if (!d) continue;
+      if (!d) {
+        const marker = this.marker(dec.expression);
+        if (marker) markers.push(marker);
+        continue;
+      }
       if (d.name === 'Controller') {
         controller = {
           className: name,
@@ -1181,6 +1193,7 @@ class JsAnalyzer {
           paths: this.nestPaths(d.args[0]),
           versions: [],
           middleware: [],
+          markers: [],
           methods: [],
           deps: {},
         };
@@ -1193,6 +1206,7 @@ class JsAnalyzer {
     }
     if (!controller) return undefined;
     controller.middleware = middleware;
+    controller.markers = markers;
     controller.versions = versions;
     controller.deps = this.facts.classes[name]?.deps ?? {};
     return controller;
@@ -1203,10 +1217,15 @@ class JsAnalyzer {
     let paths: PathExpr[] = [];
     let pos = posOf(member.key);
     const middleware: string[] = [];
+    const markers: string[] = [];
     const versions: string[] = [];
     for (const dec of member.decorators ?? []) {
       const d = this.nestDecorator(dec.expression);
-      if (!d) continue;
+      if (!d) {
+        const marker = this.marker(dec.expression);
+        if (marker) markers.push(marker);
+        continue;
+      }
       if (d.name in NEST_METHOD_DECORATORS) {
         httpMethod = NEST_METHOD_DECORATORS[d.name];
         paths = this.nestPaths(d.args[0]);
@@ -1244,6 +1263,7 @@ class JsAnalyzer {
       paths,
       versions,
       middleware,
+      markers,
       params,
       bodyType,
       serviceCalls: callable?.serviceCalls ?? [],
@@ -1263,10 +1283,62 @@ class JsAnalyzer {
         }
       }
       this.facts.nestModules.push({ name, controllers: names, pos: posOf(dec) });
+      this.appGuards(this.objectProp(d.args[0], 'providers'));
       // RouterModule.register inside @Module({ imports: [...] }) is handled by visitCall during walk.
       const imports = this.objectProp(d.args[0], 'imports');
       if (imports) this.walk(imports, this.fileScope);
     }
+  }
+
+  /** A custom (non-Nest) decorator as `@Name()`. Arguments are dropped, like middleware labels. */
+  private marker(expr: Node): string | undefined {
+    const label = shortLabel(expr);
+    return label === '(expression)' ? undefined : `@${label}`;
+  }
+
+  /** `{ provide: APP_GUARD, useClass: JwtAuthGuard }` entries in `@Module({ providers })`. */
+  private appGuards(providers: Node | undefined): void {
+    if (!providers || unwrap(providers).type !== 'ArrayExpression') return;
+    for (const el of (unwrap(providers) as t.ArrayExpression).elements) {
+      if (!el || unwrap(el as Node).type !== 'ObjectExpression') continue;
+      const provide = this.objectProp(el as Node, 'provide');
+      if (!provide || this.nestNames.get(memberText(provide) ?? '') !== 'APP_GUARD') continue;
+      const target = this.objectProp(el as Node, 'useClass') ?? this.objectProp(el as Node, 'useExisting');
+      const name = target ? memberText(target) : undefined;
+      this.facts.nestGlobalGuards.push({ name: name ?? '(factory)', via: 'APP_GUARD', pos: posOf(el as Node) });
+    }
+  }
+
+  private handleGlobalGuards(node: t.CallExpression | t.OptionalCallExpression): void {
+    for (const arg of node.arguments) {
+      if (arg.type === 'SpreadElement' || arg.type === 'ArgumentPlaceholder') continue;
+      const a = unwrap(arg as Node);
+      const name = a.type === 'NewExpression' ? memberText(a.callee as Node) : memberText(a);
+      this.facts.nestGlobalGuards.push({ name: name ?? shortLabel(a), via: 'useGlobalGuards', pos: posOf(node) });
+    }
+  }
+
+  /** `app.listen(port)` on an Express app, a Nest app, or an app imported from another module. */
+  private handleListen(node: t.CallExpression | t.OptionalCallExpression, callee: t.MemberExpression | t.OptionalMemberExpression, scope: Scope): void {
+    const receiver = this.refOf(callee.object, scope);
+    if (!this.usesNest && receiver?.k !== 'node' && receiver?.k !== 'import') return;
+    const arg = node.arguments[0];
+    if (!arg || arg.type === 'SpreadElement' || arg.type === 'ArgumentPlaceholder') return;
+    const port = this.portValue(arg as Node);
+    if (port !== undefined) this.facts.listenPort = { port, pos: posOf(node) };
+  }
+
+  /** Evaluates `3000`, `'3000'`, `process.env.PORT || 3000`, `Number(x ?? 3000)` and port constants. */
+  private portValue(node: Node): number | undefined {
+    const n = unwrap(node);
+    let value: number | undefined;
+    if (n.type === 'NumericLiteral') value = n.value;
+    else if (n.type === 'StringLiteral' && /^\d+$/.test(n.value)) value = Number(n.value);
+    else if (n.type === 'LogicalExpression' && (n.operator === '||' || n.operator === '??')) value = this.portValue(n.right) ?? this.portValue(n.left);
+    else if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && ['Number', 'parseInt'].includes(n.callee.name) && n.arguments[0]) {
+      value = this.portValue(n.arguments[0] as Node);
+    } else if (n.type === 'Identifier') value = this.portConsts.get(n.name);
+    return value !== undefined && Number.isInteger(value) && value > 0 && value < 65536 ? value : undefined;
   }
 
   private handleGlobalPrefix(node: t.CallExpression | t.OptionalCallExpression, scope: Scope): void {

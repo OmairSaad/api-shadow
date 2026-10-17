@@ -73,6 +73,7 @@ export class AnalysisController implements vscode.Disposable {
       maxFiles: this.config.maxFiles,
       maxFileSizeBytes: this.config.maxFileSizeKB * 1024,
       springApplyContextPath: this.config.springApplyContextPath,
+      auth: this.config.auth,
       workspaceRoots: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
     };
   }
@@ -137,7 +138,7 @@ export class AnalysisController implements vscode.Disposable {
   private async runOnce(cts: vscode.CancellationTokenSource, full: boolean): Promise<void> {
     if (cts.token.isCancellationRequested) return;
     if (!vscode.workspace.workspaceFolders?.length) {
-      this.publish({ endpoints: [], issues: [], duplicates: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
+      this.publish({ endpoints: [], issues: [], duplicates: [], servers: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
       return;
     }
     await this.loadPersistedCache();

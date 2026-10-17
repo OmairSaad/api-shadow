@@ -127,7 +127,7 @@ async function openApiShadow(page: Page): Promise<void> {
 }
 
 async function activeTab(page: Page, text: string): Promise<void> {
-  await expect(page.locator('.tabs-container .tab.active')).toContainText(text);
+  await expect(page.locator('.editor-group-container.active .tab.active')).toContainText(text);
 }
 
 const RAW = fs.mkdtempSync(path.join(os.tmpdir(), 'api-shadow-shots-'));
@@ -192,7 +192,37 @@ test('marketplace screenshots', async () => {
     await expect(endpoint(page, /→ ProductService\.create/)).toBeVisible();
     await shot(page, 'spring');
 
-    // 4. Search across all endpoints.
+    // 4. CodeLens above each handler, and a ready-to-send request opened beside the code.
+    await viewAction(page, 'Collapse All').click();
+    await expandRow(endpoint(page, /^UsersController, 5 endpoints/));
+    await endpoint(page, /^POST \/api\/v1\/users, NestJS/).click();
+    await activeTab(page, 'users.controller.ts');
+    const lens = page.locator('.editor-group-container.active .codelens-decoration').filter({ hasText: 'POST /api/v1/users' });
+    // A reopened file first shows cached lenses as plain text; wait for the live ones.
+    await lens.locator('a[role="button"]', { hasText: 'Try it' }).click();
+    await expect(page.locator('.editor-group-container.active .view-lines')).toContainText('POST {{baseUrl}}/api/v1/users');
+    await runCommand(page, 'Notifications: Clear All Notifications');
+    await shot(page, 'requests');
+    await runCommand(page, 'View: Revert and Close Editor');
+    await expect(page.locator('.editor-group-container')).toHaveCount(1);
+
+    // 5. Auth: admin endpoints without a guard, flagged next to protected ones.
+    await runCommand(page, 'API Shadow: Filter Endpoints by Text');
+    await waitForQuickInput(page, 'Filter API Endpoints');
+    await page.keyboard.type('admin');
+    await page.keyboard.press('Enter');
+    await expect(page.locator('.quick-input-widget')).toBeHidden();
+    await expandAllGroups(page);
+    const stats = endpoint(page, /^GET \/api\/admin\/reports\/stats, NestJS/);
+    await stats.click();
+    await activeTab(page, 'admin.controller.ts');
+    await expandRow(stats);
+    await expandRow(endpoint(page, /^DELETE \/admin\/cache, Express/));
+    await expect(page.locator('.codelens-decoration a', { hasText: 'No auth found' }).first()).toBeVisible();
+    await shot(page, 'auth');
+    await runCommand(page, 'API Shadow: Clear Filters');
+
+    // 6. Search across all endpoints.
     await runCommand(page, 'API Shadow: Search Endpoints');
     await waitForQuickInput(page, 'Search API Endpoints');
     await page.keyboard.type('users');
@@ -200,7 +230,7 @@ test('marketplace screenshots', async () => {
     await shot(page, 'search');
     await page.keyboard.press('Escape');
 
-    // 5. HTTP method filter: show the picker over the filtered tree.
+    // 7. HTTP method filter: show the picker over the filtered tree.
     await runCommand(page, 'API Shadow: Filter by HTTP Method');
     await waitForQuickInput(page, 'Filter by HTTP Method');
     await page.getByRole('checkbox', { name: /^DELETE, \d+ endpoint/ }).click();
@@ -214,7 +244,7 @@ test('marketplace screenshots', async () => {
     await page.keyboard.press('Escape');
     await runCommand(page, 'API Shadow: Clear Filters');
 
-    // 6. Issues view and Problems panel.
+    // 8. Issues view and Problems panel.
     await setPaneExpanded(page, 'Endpoints', false);
     await setPaneExpanded(page, 'Issues', true);
     const issues = page.locator('.pane').filter({ has: page.locator('.pane-header', { hasText: /Issues/ }) });
@@ -228,7 +258,7 @@ test('marketplace screenshots', async () => {
     await setPaneExpanded(page, 'Issues', false);
     await setPaneExpanded(page, 'Endpoints', true);
 
-    // 7. Markdown export rendered in the built-in preview.
+    // 9. Markdown export rendered in the built-in preview.
     const target = path.join(session.workspace, 'API-ENDPOINTS.md');
     await runCommand(page, 'API Shadow: Export Endpoints to Markdown');
     await waitForQuickInput(page, /Export API Endpoints/);

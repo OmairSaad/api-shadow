@@ -11,6 +11,7 @@ import { LinkContext, loc } from '../linkers/context';
 import { ExpressLinker } from '../linkers/expressLinker';
 import { NestLinker } from '../linkers/nestLinker';
 import { SpringLinker } from '../linkers/springLinker';
+import { applyAuth, DEFAULT_AUTH_OPTIONS, type AuthOptions, type CentralSecurity } from './auth';
 import { findDuplicates } from './duplicates';
 import { compareEndpoints } from '../export/markdown';
 import {
@@ -22,6 +23,7 @@ import {
   type Endpoint,
   type Framework,
   type Logger,
+  type ServerInfo,
 } from './types';
 
 export interface FileStat {
@@ -43,6 +45,8 @@ export interface EngineOptions {
   springApplyContextPath: boolean;
   /** Workspace folder roots, used as a fallback project root. */
   workspaceRoots: string[];
+  /** Auth detection; defaults to {@link DEFAULT_AUTH_OPTIONS}. */
+  auth?: AuthOptions;
 }
 
 interface CacheEntry {
@@ -206,12 +210,21 @@ export class AnalysisEngine {
       }
     }
 
-    // File-level issues.
+    // File-level issues, project-wide security configuration and listening ports.
     let kotlinControllers = 0;
     let firstKotlin: string | undefined;
+    const centralSecurity = new Map<string, CentralSecurity>();
+    const servers = new Map<string, ServerInfo>();
     for (const f of relevant) {
       const facts = this.cache.get(f)?.facts;
       if (!facts) continue;
+      const root = this.projectRootOf(f);
+      if (facts.lang === 'java' && facts.securityConfig && !centralSecurity.has(root)) {
+        centralSecurity.set(root, { name: facts.securityConfig.className, location: loc(f, facts.securityConfig.pos) });
+      }
+      const port = facts.lang === 'js' ? facts.listenPort : facts.lang === 'spring-config' && facts.serverPort ? { port: facts.serverPort, pos: undefined } : undefined;
+      // `.properties` wins over YAML, as for the context path.
+      if (port && (!servers.has(root) || f.endsWith('.properties'))) servers.set(root, { projectRoot: root, port: port.port, location: loc(f, port.pos) });
       if (facts.lang === 'none' && f.endsWith('.kt')) {
         kotlinControllers++;
         firstKotlin ??= f;
@@ -232,6 +245,7 @@ export class AnalysisEngine {
     if (ctx) issues.push(...ctx.issues);
     const dup = findDuplicates(endpoints);
     issues.push(...dup.issues);
+    issues.push(...applyAuth(endpoints, this.options.auth ?? DEFAULT_AUTH_OPTIONS, centralSecurity));
     endpoints.sort(compareEndpoints);
     const durationMs = Date.now() - started;
     this.logger.info(`Analysis finished in ${durationMs} ms: ${endpoints.length} endpoint(s), ${analyzed} file(s) parsed, ${fromCache} from cache.`);
@@ -239,6 +253,7 @@ export class AnalysisEngine {
       endpoints,
       issues: dedupeIssues(issues),
       duplicates: dup.groups,
+      servers: [...servers.values()].sort((a, b) => a.projectRoot.localeCompare(b.projectRoot)),
       stats: { filesDiscovered: files.length, filesAnalyzed: analyzed, filesFromCache: fromCache, filesSkipped: skipped, durationMs, truncated },
     };
   }

@@ -1,8 +1,8 @@
 {
   "name": "api-shadow",
   "displayName": "API Shadow",
-  "description": "Automatically discover and explore API endpoints in Express, NestJS and Spring Boot projects using static analysis. Fully local.",
-  "version": "0.1.0",
+  "description": "Discover every API endpoint in Express, NestJS and Spring Boot projects with static analysis: CodeLens, auth checks, cURL and .http requests. Fully local.",
+  "version": "0.2.0",
   "publisher": "OmairSaad",
   "license": "MIT",
   "author": {
@@ -38,7 +38,12 @@
     "spring",
     "spring boot",
     "openapi",
-    "rest"
+    "rest",
+    "curl",
+    "http",
+    "security",
+    "codelens",
+    "rest client"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -155,6 +160,12 @@
         "icon": "$(json)"
       },
       {
+        "command": "apiShadow.exportHttp",
+        "title": "Export Endpoints to .http Requests",
+        "category": "API Shadow",
+        "icon": "$(globe)"
+      },
+      {
         "command": "apiShadow.clearCache",
         "title": "Clear Analysis Cache and Re-analyze",
         "category": "API Shadow"
@@ -184,6 +195,23 @@
       {
         "command": "apiShadow.copyMethodAndPath",
         "title": "Copy Method and Path",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.copyCurl",
+        "title": "Copy as cURL",
+        "category": "API Shadow",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "apiShadow.openRequest",
+        "title": "Open as HTTP Request",
+        "category": "API Shadow",
+        "icon": "$(play)"
+      },
+      {
+        "command": "apiShadow.endpointActions",
+        "title": "Endpoint Actions",
         "category": "API Shadow"
       }
     ],
@@ -230,6 +258,11 @@
           "group": "export@2"
         },
         {
+          "command": "apiShadow.exportHttp",
+          "when": "view == apiShadow.endpoints",
+          "group": "export@3"
+        },
+        {
           "command": "apiShadow.clearCache",
           "when": "view == apiShadow.endpoints",
           "group": "maintenance@1"
@@ -246,6 +279,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "apiShadow.openRequest",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "inline@0"
+        },
         {
           "command": "apiShadow.openHandler",
           "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
@@ -270,6 +308,16 @@
           "command": "apiShadow.copyMethodAndPath",
           "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
           "group": "2_copy@2"
+        },
+        {
+          "command": "apiShadow.openRequest",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "1_navigation@2"
+        },
+        {
+          "command": "apiShadow.copyCurl",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "2_copy@3"
         }
       ],
       "commandPalette": [
@@ -292,6 +340,10 @@
         {
           "command": "apiShadow.clearFilter",
           "when": "apiShadow.filtered"
+        },
+        {
+          "command": "apiShadow.endpointActions",
+          "when": "false"
         }
       ]
     },
@@ -402,6 +454,77 @@
           "type": "boolean",
           "default": true,
           "description": "Include source file paths and line numbers in Markdown and OpenAPI exports."
+        },
+        "apiShadow.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show method, path, auth and request actions (**Try it**, **cURL**) above each endpoint declaration."
+        },
+        "apiShadow.auth.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect whether endpoints are protected by auth middleware, guards or security annotations."
+        },
+        "apiShadow.auth.warnings": {
+          "type": "string",
+          "enum": [
+            "sensitive",
+            "all",
+            "off"
+          ],
+          "enumDescriptions": [
+            "Write endpoints (POST, PUT, PATCH, DELETE) and admin or internal paths",
+            "Every endpoint",
+            "No warnings; auth is still shown"
+          ],
+          "default": "sensitive",
+          "markdownDescription": "Which endpoints without auth to report in the Issues view. Only projects where other endpoints have auth are reported, and sign-in, webhook, health and documentation paths never are."
+        },
+        "apiShadow.auth.patterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "auth",
+            "jwt",
+            "bearer",
+            "token",
+            "api[-_]?key",
+            "logged[-_]?in",
+            "signed[-_]?in",
+            "require[-_]?(user|login|session)",
+            "role",
+            "permission",
+            "admin",
+            "protect",
+            "^(UseGuards|APP_GUARD|useGlobalGuards)\\((?!.*(throttl|ratelimit))",
+            "Secured",
+            "RolesAllowed",
+            "DenyAll"
+          ],
+          "markdownDescription": "Case-insensitive regular expressions matched against middleware, guards, security annotations and decorators (e.g. `UseGuards(JwtAuthGuard)`, `requireAuth`). A match marks the endpoint as protected. Add your own auth middleware names here."
+        },
+        "apiShadow.auth.publicPatterns": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "@Public\\b",
+            "@(Allow)?Anonymous\\b",
+            "@(Skip|No)Auth\\b",
+            "@IsPublic\\b",
+            "PermitAll",
+            "permitAll\\(\\)",
+            "isAnonymous\\(\\)"
+          ],
+          "markdownDescription": "Case-insensitive regular expressions for explicit opt-outs such as `@Public()` or `@PermitAll`. They win over `#apiShadow.auth.patterns#`."
+        },
+        "apiShadow.requests.baseUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base URL for **Try it**, **Copy as cURL** and `.http` exports, e.g. `https://staging.example.com`. When empty, `http://localhost:<port>` is used with the port from `app.listen()` or `server.port`, falling back to 3000 (Express, NestJS) or 8080 (Spring)."
         }
       }
     }
@@ -423,7 +546,7 @@
     "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
-    "test:e2e:vsix": "npm run package && cross-env API_SHADOW_VSIX=api-shadow-0.1.0.vsix playwright test",
+    "test:e2e:vsix": "npm run package && cross-env API_SHADOW_VSIX=api-shadow-0.2.0.vsix playwright test",
     "screenshots": "npm run package && playwright test -c scripts/screenshots/playwright.config.ts"
   },
   "dependencies": {

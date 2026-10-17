@@ -18,7 +18,8 @@ export function isFilterActive(filter: EndpointFilter): boolean {
 
 /**
  * Text filter: whitespace-separated terms, all of which must match (case-insensitive) one of
- * method, path, controller, handler, framework, middleware, services or the file name.
+ * method, path, controller, handler, framework, middleware, services, the file name or the
+ * auth status as `auth:protected`, `auth:public`, `auth:central` or `auth:none`.
  */
 export function matchesFilter(e: Endpoint, filter: EndpointFilter): boolean {
   if (filter.methods.size > 0 && !filter.methods.has(e.method)) return false;
@@ -33,6 +34,7 @@ export function matchesFilter(e: Endpoint, filter: EndpointFilter): boolean {
     path.basename(e.location.file),
     ...e.middleware,
     ...e.services.map((s) => s.name),
+    e.auth ? `auth:${e.auth.status}` : '',
   ]
     .join('\n')
     .toLowerCase();
