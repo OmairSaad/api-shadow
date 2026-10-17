@@ -1,0 +1,15 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "mocha"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "outDir": "out",
+    "rootDir": "."
+  },
+  "include": ["test/integration/**/*.ts", "test/e2e/**/*.ts", "scripts/screenshots/**/*.ts", "playwright.config.ts"]
+}

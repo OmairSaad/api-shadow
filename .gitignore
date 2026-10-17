@@ -1,0 +1,10 @@
+node_modules/
+# Deliberate decoy used by the tests to prove node_modules is never analysed.
+!test/fixtures/express-app/node_modules/
+dist/
+out/
+.vscode-test/
+test-results/
+playwright-report/
+coverage/
+*.vsix

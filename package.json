@@ -1,0 +1,456 @@
+{
+  "name": "api-shadow",
+  "displayName": "API Shadow",
+  "description": "Automatically discover and explore API endpoints in Express, NestJS and Spring Boot projects using static analysis. Fully local.",
+  "version": "0.1.0",
+  "publisher": "omairsaad",
+  "license": "MIT",
+  "author": {
+    "name": "OmairSaad"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OmairSaad/api-shadow.git"
+  },
+  "homepage": "https://github.com/OmairSaad/api-shadow#readme",
+  "bugs": {
+    "url": "https://github.com/OmairSaad/api-shadow/issues"
+  },
+  "pricing": "Free",
+  "icon": "resources/icon.png",
+  "galleryBanner": {
+    "color": "#1e1b2e",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "api",
+    "endpoints",
+    "routes",
+    "express",
+    "nestjs",
+    "spring",
+    "spring boot",
+    "openapi",
+    "rest"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/package.json",
+    "workspaceContains:**/pom.xml",
+    "workspaceContains:**/build.gradle",
+    "workspaceContains:**/build.gradle.kts"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": true,
+      "description": "API Shadow only reads source files and never executes workspace code, so it is safe in Restricted Mode."
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "API Shadow resolves imports using local file paths."
+    }
+  },
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "apiShadow",
+          "title": "API Shadow",
+          "icon": "resources/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "apiShadow": [
+        {
+          "id": "apiShadow.endpoints",
+          "name": "Endpoints",
+          "icon": "resources/activity.svg",
+          "contextualTitle": "API Shadow"
+        },
+        {
+          "id": "apiShadow.issues",
+          "name": "Issues",
+          "icon": "resources/activity.svg",
+          "contextualTitle": "API Shadow"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "apiShadow.endpoints",
+        "contents": "Open a folder that contains an Express, NestJS or Spring Boot project to discover its API endpoints.\n[Open Folder](command:workbench.action.files.openFolder)",
+        "when": "workbenchState == empty"
+      },
+      {
+        "view": "apiShadow.endpoints",
+        "contents": "Analyzing workspace for API endpoints…",
+        "when": "workbenchState != empty && !apiShadow.ready"
+      },
+      {
+        "view": "apiShadow.endpoints",
+        "contents": "No API endpoints were found.\nAPI Shadow supports Express, NestJS and Spring Boot (Java). Check the Issues view for files that could not be analyzed.\n[Refresh](command:apiShadow.refresh)\n[Show Log](command:apiShadow.showLog)",
+        "when": "workbenchState != empty && apiShadow.ready && !apiShadow.hasEndpoints"
+      },
+      {
+        "view": "apiShadow.issues",
+        "contents": "No duplicate routes or analysis limitations.",
+        "when": "apiShadow.ready"
+      }
+    ],
+    "commands": [
+      {
+        "command": "apiShadow.refresh",
+        "title": "Refresh Endpoints",
+        "category": "API Shadow",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "apiShadow.search",
+        "title": "Search Endpoints",
+        "category": "API Shadow",
+        "icon": "$(search)"
+      },
+      {
+        "command": "apiShadow.filter",
+        "title": "Filter Endpoints by Text",
+        "category": "API Shadow",
+        "icon": "$(filter)"
+      },
+      {
+        "command": "apiShadow.filterByMethod",
+        "title": "Filter by HTTP Method",
+        "category": "API Shadow",
+        "icon": "$(symbol-event)"
+      },
+      {
+        "command": "apiShadow.clearFilter",
+        "title": "Clear Filters",
+        "category": "API Shadow",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "apiShadow.groupBy",
+        "title": "Group Endpoints By…",
+        "category": "API Shadow",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "apiShadow.exportMarkdown",
+        "title": "Export Endpoints to Markdown",
+        "category": "API Shadow",
+        "icon": "$(markdown)"
+      },
+      {
+        "command": "apiShadow.exportOpenApi",
+        "title": "Export Endpoints to OpenAPI 3.0 (JSON)",
+        "category": "API Shadow",
+        "icon": "$(json)"
+      },
+      {
+        "command": "apiShadow.clearCache",
+        "title": "Clear Analysis Cache and Re-analyze",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.showLog",
+        "title": "Show Log",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.openLocation",
+        "title": "Open Source Location",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.openHandler",
+        "title": "Go to Handler",
+        "category": "API Shadow",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "apiShadow.copyPath",
+        "title": "Copy Path",
+        "category": "API Shadow",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "apiShadow.copyMethodAndPath",
+        "title": "Copy Method and Path",
+        "category": "API Shadow"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "apiShadow.search",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@1"
+        },
+        {
+          "command": "apiShadow.filter",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@2"
+        },
+        {
+          "command": "apiShadow.filterByMethod",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@3"
+        },
+        {
+          "command": "apiShadow.clearFilter",
+          "when": "view == apiShadow.endpoints && apiShadow.filtered",
+          "group": "navigation@4"
+        },
+        {
+          "command": "apiShadow.groupBy",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@5"
+        },
+        {
+          "command": "apiShadow.refresh",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@6"
+        },
+        {
+          "command": "apiShadow.exportMarkdown",
+          "when": "view == apiShadow.endpoints",
+          "group": "export@1"
+        },
+        {
+          "command": "apiShadow.exportOpenApi",
+          "when": "view == apiShadow.endpoints",
+          "group": "export@2"
+        },
+        {
+          "command": "apiShadow.clearCache",
+          "when": "view == apiShadow.endpoints",
+          "group": "maintenance@1"
+        },
+        {
+          "command": "apiShadow.showLog",
+          "when": "view == apiShadow.endpoints",
+          "group": "maintenance@2"
+        },
+        {
+          "command": "apiShadow.refresh",
+          "when": "view == apiShadow.issues",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "apiShadow.openHandler",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "inline@1"
+        },
+        {
+          "command": "apiShadow.copyPath",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "inline@2"
+        },
+        {
+          "command": "apiShadow.openHandler",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "1_navigation@1"
+        },
+        {
+          "command": "apiShadow.copyPath",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "apiShadow.copyMethodAndPath",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "2_copy@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "apiShadow.openLocation",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.openHandler",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.copyPath",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.copyMethodAndPath",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.clearFilter",
+          "when": "apiShadow.filtered"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "API Shadow",
+      "properties": {
+        "apiShadow.frameworks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "express",
+              "nestjs",
+              "spring"
+            ]
+          },
+          "default": [
+            "express",
+            "nestjs",
+            "spring"
+          ],
+          "uniqueItems": true,
+          "description": "Frameworks to detect."
+        },
+        "apiShadow.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Additional glob patterns (relative to the workspace folder) to exclude from analysis, e.g. `**/legacy/**`. `node_modules`, build outputs and `.git` are always excluded."
+        },
+        "apiShadow.includeTestFiles": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Analyze test files (`*.spec.ts`, `*.test.js`, `__tests__/`, `src/test/`)."
+        },
+        "apiShadow.respectFilesExclude": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also skip files matched by `#files.exclude#`."
+        },
+        "apiShadow.maxFiles": {
+          "type": "number",
+          "default": 20000,
+          "minimum": 100,
+          "description": "Maximum number of candidate source files to analyze. Larger workspaces are truncated and a warning is shown."
+        },
+        "apiShadow.maxFileSizeKB": {
+          "type": "number",
+          "default": 512,
+          "minimum": 16,
+          "description": "Files larger than this (in KB) are skipped, which usually excludes generated or bundled code."
+        },
+        "apiShadow.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Re-analyze automatically when relevant files change."
+        },
+        "apiShadow.refreshDebounceMs": {
+          "type": "number",
+          "default": 800,
+          "minimum": 100,
+          "description": "Delay after the last file change before re-analyzing."
+        },
+        "apiShadow.groupBy": {
+          "type": "string",
+          "enum": [
+            "controller",
+            "file",
+            "method",
+            "framework",
+            "path",
+            "none"
+          ],
+          "enumDescriptions": [
+            "Controller class or router file",
+            "Source file",
+            "HTTP method",
+            "Framework",
+            "First path segment",
+            "Flat list"
+          ],
+          "default": "controller",
+          "description": "Default grouping of the Endpoints view."
+        },
+        "apiShadow.diagnostics.duplicates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Report potential duplicate routes in the Problems panel."
+        },
+        "apiShadow.showStatusBar": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the endpoint count in the status bar."
+        },
+        "apiShadow.spring.applyContextPath": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Prefix Spring endpoints with `server.servlet.context-path` / `spring.mvc.servlet.path` from `application.properties` / `application.yml`."
+        },
+        "apiShadow.persistCache": {
+          "type": "boolean",
+          "default": true,
+          "description": "Persist per-file analysis results between sessions (stored in VS Code workspace storage) to speed up startup."
+        },
+        "apiShadow.export.includeSourceLocations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include source file paths and line numbers in Markdown and OpenAPI exports."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build:prod",
+    "build": "node scripts/build.mjs",
+    "build:prod": "node scripts/build.mjs --production",
+    "watch": "node scripts/build.mjs --watch",
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.test.json --noEmit",
+    "lint": "eslint .",
+    "test": "npm run test:unit",
+    "test:unit": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "pretest:integration": "npm run build && tsc -p tsconfig.test.json",
+    "test:integration": "vscode-test",
+    "pretest:e2e": "npm run build",
+    "test:e2e": "playwright test",
+    "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e",
+    "package": "vsce package --no-dependencies",
+    "publish": "vsce publish --no-dependencies",
+    "test:e2e:vsix": "npm run package && cross-env API_SHADOW_VSIX=api-shadow-0.1.0.vsix playwright test",
+    "screenshots": "npm run package && playwright test -c scripts/screenshots/playwright.config.ts"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.29.9",
+    "java-parser": "^3.0.1",
+    "yaml": "^2.9.1"
+  },
+  "devDependencies": {
+    "@apidevtools/swagger-parser": "^13.1.0",
+    "@babel/types": "^7.29.8",
+    "@eslint/js": "^9.39.5",
+    "@playwright/test": "^1.64.1",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^22.20.5",
+    "@types/vscode": "^1.85.0",
+    "@vscode/test-cli": "^0.0.15",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "cross-env": "^10.1.0",
+    "esbuild": "^0.28.2",
+    "eslint": "^9.39.5",
+    "mocha": "^12.0.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.5"
+  },
+  "extensionKind": [
+    "workspace"
+  ]
+}

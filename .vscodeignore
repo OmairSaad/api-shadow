@@ -1,0 +1,11 @@
+# Ship only the bundled extension and its assets. Everything else (sources, tests, fixtures,
+# node_modules, VS Code test downloads) is excluded. Dependencies are bundled into dist/.
+**
+!dist/extension.js
+!dist/extension.js.LEGAL.txt
+!resources/icon.png
+!resources/activity.svg
+!README.md
+!CHANGELOG.md
+!LICENSE
+!package.json
