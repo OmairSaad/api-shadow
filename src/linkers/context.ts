@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type { FileFacts, Pos } from '../analyzers/facts';
 import type { AnalysisIssue, Endpoint, SourceLocation } from '../core/types';
+import type { Registration } from '../core/shadowing';
 import { resolveJsFacts } from './jsConstants';
 
 export interface LinkOptions {
@@ -16,6 +17,8 @@ export interface LinkOptions {
 export class LinkContext {
   readonly issues: AnalysisIssue[] = [];
   readonly requested = new Set<string>();
+  /** Registration order of endpoints, for unreachable-route detection. */
+  readonly registrations = new Map<string, Registration>();
 
   constructor(
     private readonly facts: ReadonlyMap<string, FileFacts>,

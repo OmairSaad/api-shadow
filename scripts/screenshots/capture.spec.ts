@@ -48,6 +48,9 @@ function prepareDemoWorkspace(workspace: string): void {
   fs.rmSync(path.join(workspace, 'express-app/src/routes/broken.js'), { force: true });
   fs.rmSync(path.join(workspace, 'spring-app/src/main/java/com/example/shop/controller/BrokenController.java'), { force: true });
   fs.rmSync(path.join(workspace, 'express-app/node_modules'), { recursive: true, force: true });
+  // A git history for the API diff screenshot.
+  const env = { ...process.env, GIT_AUTHOR_NAME: 'Demo', GIT_AUTHOR_EMAIL: 'demo@example.com', GIT_COMMITTER_NAME: 'Demo', GIT_COMMITTER_EMAIL: 'demo@example.com' };
+  for (const args of [['init', '-q', '-b', 'main'], ['add', '.'], ['commit', '-q', '-m', 'Initial API']]) execFileSync('git', args, { cwd: workspace, env });
 }
 
 async function launch(deviceScaleFactor: number): Promise<VSCodeSession> {
@@ -271,6 +274,60 @@ test('marketplace screenshots', async () => {
     await activeTab(page, 'Preview API-ENDPOINTS.md');
     await page.waitForTimeout(2000);
     await shot(page, 'export');
+    await runCommand(page, 'View: Close All Editors');
+
+    // 10. Frontend → backend: CodeLens and hover on a React API client.
+    await page.keyboard.press('Control+P');
+    await page.locator('.quick-input-widget input.input').fill('web-app/src/api/client.ts');
+    await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'client.ts' }).first().click();
+    await activeTab(page, 'client.ts');
+    const group = page.locator('.editor-group-container.active');
+    await expect(group.locator('.codelens-decoration').filter({ hasText: 'UsersController.create' })).toBeVisible();
+    await viewAction(page, 'Collapse All').click();
+    await expandRow(endpoint(page, /^UsersController, 5 endpoints/));
+    await expandRow(endpoint(page, /^POST \/api\/v1\/users, NestJS/));
+    await group.locator('.view-line span', { hasText: "'/api/v1/users'" }).first().hover();
+    await expect(page.locator('.monaco-hover').filter({ hasText: 'UsersController.create' }).first()).toBeVisible();
+    await page.waitForTimeout(600);
+    await page.screenshot({ path: path.join(RAW, 'frontend.png') });
+    execFileSync('convert', [path.join(RAW, 'frontend.png'), '-filter', 'Lanczos', '-resize', `${OUTPUT_WIDTH}x`, '-strip', '-define', 'png:compression-level=9', path.join(MEDIA, 'frontend.png')]);
+    await page.keyboard.press('Escape');
+
+    // 11. Unreachable route.
+    await viewAction(page, 'Collapse All').click();
+    await expandRow(endpoint(page, /^userController, \d+ endpoints/));
+    const me = endpoint(page, /^GET \/users\/me, Express/);
+    await me.click();
+    await activeTab(page, 'users.js');
+    await expandRow(me);
+    await expect(page.locator('.codelens-decoration a', { hasText: 'Unreachable' })).toBeVisible();
+    await shot(page, 'unreachable');
+
+    // 12. Request flow.
+    await runCommand(page, 'API Shadow: Show Request Flow');
+    await waitForQuickInput(page, 'Show Request Flow');
+    await page.locator('.quick-input-widget input.input').fill('POST /api/v1/users');
+    await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'POST /api/v1/users' }).first().click();
+    await expect(page.locator('.tab', { hasText: 'Flow: POST /api/v1/users' })).toBeVisible();
+    await page.waitForTimeout(1200);
+    await shot(page, 'flow');
+    await runCommand(page, 'View: Close All Editors');
+
+    // 13. API diff against main after a few changes.
+    const health = path.join(session.workspace, 'express-app/src/routes/health.js');
+    fs.writeFileSync(health, fs.readFileSync(health, 'utf8').replace("app.get('/health/ready'", "app.get('/health/live', (req, res) => res.json({ live: true }));\n  app.get('/health/readiness'"));
+    const admin = path.join(session.workspace, 'express-app/src/app.js');
+    fs.writeFileSync(admin, fs.readFileSync(admin, 'utf8').replace("app.use('/admin', authenticate, requireAdmin, adminRouter);", "app.use('/admin', adminRouter);"));
+    const orders = path.join(session.workspace, 'express-app/src/routes/orders.js');
+    fs.writeFileSync(orders, fs.readFileSync(orders, 'utf8').replace(/\n[^\n]*\.post\([^\n]*\n/, '\n'));
+    await expect(endpoint(page, /^admin, 2 endpoints/)).toBeVisible();
+    await page.waitForTimeout(2500);
+    await runCommand(page, 'API Shadow: Compare API with Branch or Tag…');
+    await waitForQuickInput(page, 'Compare API With…');
+    await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'main' }).first().click();
+    await expect(page.locator('.tab', { hasText: /Preview/ })).toBeVisible({ timeout: 30000 });
+    await page.waitForTimeout(2000);
+    await shot(page, 'diff');
   } finally {
     await session.close();
   }
@@ -360,8 +417,10 @@ class Screencast {
     lines.push(`file '${this.frames[this.frames.length - 1].file}'`);
     const list = path.join(this.dir, 'frames.txt');
     fs.writeFileSync(list, lines.join('\n') + '\n');
-    const filters = 'fps=15,split[a][b];[a]palettegen=max_colors=256:stats_mode=full[p];[b][p]paletteuse=dither=none:diff_mode=rectangle';
-    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-vf', filters, '-loop', '0', out]);
+    // Two passes (palette, then encode) so ffmpeg streams frames instead of buffering all of them.
+    const palette = path.join(this.dir, 'palette.png');
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-vf', 'fps=15,palettegen=max_colors=256:stats_mode=full', palette]);
+    execFileSync('ffmpeg', ['-y', '-loglevel', 'error', '-f', 'concat', '-safe', '0', '-i', list, '-i', palette, '-lavfi', 'fps=15[x];[x][1:v]paletteuse=dither=none:diff_mode=rectangle', '-loop', '0', out]);
   }
 }
 

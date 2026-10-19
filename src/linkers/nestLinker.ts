@@ -18,6 +18,7 @@ interface ProjectConfig {
   /** controller class -> module names */
   controllerModules: Map<string, string[]>;
   globalGuards: { fact: NestGlobalGuardFact; file: string }[];
+  globalPipes: { fact: NestGlobalGuardFact; file: string }[];
 }
 
 export class NestLinker {
@@ -30,7 +31,7 @@ export class NestLinker {
     const configFor = (root: string): ProjectConfig => {
       let c = configs.get(root);
       if (!c) {
-        c = { modulePrefixes: new Map(), controllerModules: new Map(), globalGuards: [] };
+        c = { modulePrefixes: new Map(), controllerModules: new Map(), globalGuards: [], globalPipes: [] };
         configs.set(root, c);
       }
       return c;
@@ -54,6 +55,7 @@ export class NestLinker {
         }
       }
       for (const fact of facts.nestGlobalGuards) config.globalGuards.push({ fact, file });
+      for (const fact of facts.nestGlobalPipes ?? []) config.globalPipes.push({ fact, file });
       for (const mod of facts.nestModules) {
         for (const c of mod.controllers) {
           const list = config.controllerModules.get(c) ?? [];
@@ -76,12 +78,12 @@ export class NestLinker {
       const root = this.ctx.projectRootOf(file);
       const config = configFor(root);
       // Global guards run before controller and method guards.
-      const globalGuards = config.globalGuards.map((g) => `${g.fact.via}(${g.fact.name})`);
+      const globalGuards = [...config.globalGuards, ...config.globalPipes].map((g) => `${g.fact.via}(${g.fact.name})`);
       const guardNotes = config.globalGuards.map((g) => `Global guard ${g.fact.name} (${g.fact.via}, ${shortFile(g.file)}:${g.fact.pos.line})`);
       for (const controller of facts.nestControllers) {
         const modules = config.controllerModules.get(controller.className) ?? [];
         const modulePrefix = modules.map((m) => config.modulePrefixes.get(m)).find((p) => p !== undefined);
-        for (const method of controller.methods) {
+        controller.methods.forEach((method, methodIndex) => {
           const versions = method.versions.length > 0 ? method.versions : controller.versions.length > 0 ? controller.versions : (config.versioning?.fact.defaultVersions ?? []);
           const versioning = config.versioning?.fact;
           const uriVersions =
@@ -127,7 +129,7 @@ export class NestLinker {
                   handler: method.name,
                   location,
                   handlerLocation: callable ? loc(file, callable.pos) : undefined,
-                  middleware: [...new Set([...globalGuards, ...controller.middleware, ...method.middleware])],
+                  middleware: [...new Set([...globalGuards, ...controller.middleware, ...method.middleware, ...(method.bodyPipes ?? []).map((p) => `Body(${p})`)])],
                   markers: [...new Set([...controller.markers, ...method.markers])],
                   services: this.services(file, facts, method.serviceCalls),
                   parameters: method.params.map(({ name, in: where, required, type }) => ({ name, in: where, required, type })),
@@ -138,10 +140,12 @@ export class NestLinker {
                 };
                 endpoint.id = endpointId(endpoint, version);
                 endpoints.push(endpoint);
+                // Nest registers a controller's routes in declaration order.
+                this.ctx.registrations.set(endpoint.id, { chain: [{ scope: `${file}|${controller.className}|${exprToDisplay(cPath)}|${version}`, order: methodIndex }], passThrough: false });
               }
             }
           }
-        }
+        });
       }
     }
     return endpoints;

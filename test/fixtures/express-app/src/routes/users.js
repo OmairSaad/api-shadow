@@ -6,6 +6,8 @@ const router = express.Router();
 
 router.get('/', userController.list);
 router.get('/:id', userController.getById);
+// Never runs: GET /:id above matches /me first.
+router.get('/me', userController.me);
 router.post('/', validate('user'), userController.create);
 router
   .route('/:id/avatar')

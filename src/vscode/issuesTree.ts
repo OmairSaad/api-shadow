@@ -6,8 +6,12 @@ import { relativePath } from './endpointTree';
 export type IssueTreeNode = { type: 'section'; kind: IssueKind; issues: AnalysisIssue[] } | { type: 'issue'; issue: AnalysisIssue; index: number };
 
 const SECTIONS: { kind: IssueKind; label: string; icon: string }[] = [
+  { kind: 'unreachable', label: 'Unreachable routes', icon: 'error' },
+  { kind: 'broken-call', label: 'Calls to missing routes', icon: 'debug-disconnect' },
   { kind: 'duplicate', label: 'Potential duplicate routes', icon: 'warning' },
   { kind: 'no-auth', label: 'Endpoints without detected auth', icon: 'unlock' },
+  { kind: 'no-validation', label: 'Request bodies without validation', icon: 'circle-slash' },
+  { kind: 'uncalled', label: 'Endpoints nothing calls', icon: 'eye-closed' },
   { kind: 'parse-error', label: 'Parse errors', icon: 'error' },
   { kind: 'limitation', label: 'Analysis limitations', icon: 'info' },
   { kind: 'skipped', label: 'Skipped files', icon: 'circle-slash' },
@@ -38,7 +42,8 @@ export class IssuesTreeProvider implements vscode.TreeDataProvider<IssueTreeNode
   getTreeItem(node: IssueTreeNode): vscode.TreeItem {
     if (node.type === 'section') {
       const meta = SECTIONS.find((s) => s.kind === node.kind)!;
-      const expanded = node.kind === 'duplicate' || node.kind === 'parse-error' || (node.kind === 'no-auth' && node.issues.length <= 10);
+      // Bugs open by default; review lists (auth, validation, uncalled) stay collapsed.
+      const expanded = node.kind === 'duplicate' || node.kind === 'unreachable' || node.kind === 'broken-call' || node.kind === 'parse-error';
       const item = new vscode.TreeItem(meta.label, expanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `section:${node.kind}`;
       item.description = String(node.issues.length);

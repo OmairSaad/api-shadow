@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import { execFileSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -74,7 +75,7 @@ describe('API Shadow extension (Extension Development Host)', function () {
 
   it('registers all contributed commands', async function () {
     const commands = await vscode.commands.getCommands(true);
-    for (const id of ['refresh', 'search', 'filter', 'filterByMethod', 'clearFilter', 'groupBy', 'exportMarkdown', 'exportOpenApi', 'exportHttp', 'clearCache', 'showLog', 'openLocation', 'openHandler', 'copyPath', 'copyCurl', 'openRequest', 'endpointActions']) {
+    for (const id of ['refresh', 'search', 'filter', 'filterByMethod', 'clearFilter', 'groupBy', 'exportMarkdown', 'exportOpenApi', 'exportHttp', 'clearCache', 'showLog', 'openLocation', 'openHandler', 'copyPath', 'copyCurl', 'openRequest', 'endpointActions', 'showFlow', 'showCallers', 'compareWithRef']) {
       assert.ok(commands.includes(`apiShadow.${id}`), `apiShadow.${id}`);
     }
   });
@@ -178,9 +179,9 @@ describe('API Shadow extension (Extension Development Host)', function () {
     const lenses = (await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', users)) ?? [];
     const create = api.getResult()!.endpoints.find((e) => e.method === 'POST' && e.path === '/api/v1/users')!;
     const titles = lenses.filter((l) => l.range.start.line === create.location.line - 1).map((l) => l.command?.title);
-    assert.deepStrictEqual(titles, ['POST /api/v1/users', '$(shield) AuthGuard, RolesGuard', '$(play) Try it', '$(copy) cURL'], JSON.stringify(titles));
+    assert.deepStrictEqual(titles, ['POST /api/v1/users', '$(shield) AuthGuard, RolesGuard', '$(references) 1 caller', '$(play) Try it', '$(copy) cURL'], JSON.stringify(titles));
     const commands = lenses.filter((l) => l.range.start.line === create.location.line - 1).map((l) => l.command?.command);
-    assert.deepStrictEqual(commands, ['apiShadow.endpointActions', '', 'apiShadow.openRequest', 'apiShadow.copyCurl']);
+    assert.deepStrictEqual(commands, ['apiShadow.endpointActions', '', 'apiShadow.showCallers', 'apiShadow.openRequest', 'apiShadow.copyCurl']);
 
     const admin = vscode.Uri.file(path.join(workspaceRoot(), 'nest-app', 'src', 'admin', 'admin.controller.ts'));
     await vscode.workspace.openTextDocument(admin);
@@ -229,6 +230,77 @@ describe('API Shadow extension (Extension Development Host)', function () {
     const create = api.getTreeChildren(users).find((n) => n.type === 'endpoint' && n.endpoint.method === 'POST')!;
     const details = api.getTreeChildren(create).map((d) => (d.type === 'detail' ? d.label : ''));
     assert.ok(details.includes('Auth: UseGuards(AuthGuard), UseGuards(RolesGuard)'), details.join('\n'));
+  });
+
+  it('jumps from a frontend call to its handler, with a hover', async function () {
+    const client = vscode.Uri.file(path.join(workspaceRoot(), 'web-app', 'src', 'api', 'client.ts'));
+    const doc = await vscode.workspace.openTextDocument(client);
+    const line = doc.getText().split('\n').findIndex((l) => l.includes("axios.post('/api/v1/users'"));
+    const at = new vscode.Position(line, doc.lineAt(line).text.indexOf("'/api") + 3);
+    const defs = (await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>('vscode.executeDefinitionProvider', client, at)) ?? [];
+    const targets = defs.map((d) => ('targetUri' in d ? d.targetUri : d.uri).fsPath);
+    assert.ok(targets.some((f) => f.endsWith(path.join('users', 'users.controller.ts'))), JSON.stringify(targets));
+    const hovers = (await vscode.commands.executeCommand<vscode.Hover[]>('vscode.executeHoverProvider', client, at)) ?? [];
+    const text = hovers.flatMap((h) => h.contents.map((c) => (typeof c === 'string' ? c : 'value' in c ? c.value : ''))).join('\n');
+    assert.match(text, /UsersController\.create/);
+    const lenses = (await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', client)) ?? [];
+    assert.ok(lenses.some((l) => l.range.start.line === line && l.command?.title === '$(arrow-right) POST /api/v1/users · UsersController.create'), JSON.stringify(lenses.map((l) => l.command?.title)));
+  });
+
+  it('finds endpoints with Go to Symbol in Workspace', async function () {
+    const symbols = (await vscode.commands.executeCommand<vscode.SymbolInformation[]>('vscode.executeWorkspaceSymbolProvider', 'GET /users/me')) ?? [];
+    assert.ok(symbols.some((s) => s.name === 'GET /users/me' && s.location.uri.fsPath.endsWith('users.js')), JSON.stringify(symbols.map((s) => s.name)));
+  });
+
+  it('reports unreachable routes and calls to missing routes in the Problems panel', function () {
+    const users = vscode.languages.getDiagnostics(vscode.Uri.file(path.join(workspaceRoot(), 'express-app', 'src', 'routes', 'users.js')));
+    const unreachable = users.find((d) => d.code === 'unreachable-route');
+    assert.ok(unreachable && /GET \/users\/me is unreachable/.test(unreachable.message), JSON.stringify(users.map((d) => d.message)));
+    assert.strictEqual(unreachable.relatedInformation?.[0].location.range.start.line, 7);
+    const orders = vscode.languages.getDiagnostics(vscode.Uri.file(path.join(workspaceRoot(), 'web-app', 'src', 'pages', 'Orders.tsx')));
+    assert.deepStrictEqual(orders.filter((d) => d.source === 'API Shadow').map((d) => d.message), ['No route matches GET /api/order (fetch, Orders.tsx:9).']);
+  });
+
+  it('shows callers and the request flow of an endpoint', async function () {
+    const create = api.getResult()!.endpoints.find((e) => e.method === 'POST' && e.path === '/api/v1/users')!;
+    assert.deepStrictEqual(create.usage, { calls: 1, tests: 0 });
+    const callers = await vscode.commands.executeCommand<{ location: { file: string } }[]>('apiShadow.showCallers', create);
+    assert.ok(callers?.length === 1 && callers[0].location.file.endsWith('client.ts'));
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    await vscode.commands.executeCommand('apiShadow.showFlow', create);
+    // The tab model is updated asynchronously after the panel is created.
+    let tabs: string[] = [];
+    for (let i = 0; i < 50 && !tabs.includes('Flow: POST /api/v1/users'); i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      tabs = vscode.window.tabGroups.all.flatMap((g) => g.tabs.map((t) => t.label));
+    }
+    assert.ok(tabs.includes('Flow: POST /api/v1/users'), JSON.stringify(tabs));
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  it('compares the API with a git revision', async function () {
+    const root = workspaceRoot();
+    const env = { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' };
+    const git = (...args: string[]): void => void execFileSync('git', args, { cwd: root, env });
+    fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+    git('init', '-q', '-b', 'main');
+    git('add', '.');
+    git('commit', '-q', '-m', 'base');
+    const health = path.join(root, 'express-app', 'src', 'routes', 'health.js');
+    const original = fs.readFileSync(health, 'utf8');
+    try {
+      fs.writeFileSync(health, original.replace("app.get('/health/ready'", "app.get('/health/live', (req, res) => res.end());\n  app.get('/health/ready'"));
+      await waitForResult(api, (r) => r.endpoints.some((e) => e.path === '/health/live'));
+      const diff = await vscode.commands.executeCommand<{ added: { path: string }[]; removed: unknown[]; breaking: number }>('apiShadow.compareWithRef', 'main');
+      assert.deepStrictEqual(diff?.added.map((e) => e.path), ['/health/live']);
+      assert.strictEqual(diff?.removed.length, 0);
+      assert.strictEqual(diff?.breaking, 0);
+    } finally {
+      fs.writeFileSync(health, original);
+      fs.rmSync(path.join(root, '.git'), { recursive: true, force: true });
+      await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    }
+    await waitForResult(api, (r) => !r.endpoints.some((e) => e.path === '/health/live'));
   });
 
   it('lists analysis limitations', function () {

@@ -1,8 +1,8 @@
 {
   "name": "api-shadow",
   "displayName": "API Shadow",
-  "description": "Discover every API endpoint in Express, NestJS and Spring Boot projects with static analysis: CodeLens, auth checks, cURL and .http requests. Fully local.",
-  "version": "0.2.0",
+  "description": "See every API endpoint in Express, Fastify, Koa, NestJS and Spring Boot: unreachable routes, frontend calls, tests, auth, validation and API diffs. Fully local.",
+  "version": "0.3.0",
   "publisher": "OmairSaad",
   "license": "MIT",
   "author": {
@@ -43,7 +43,12 @@
     "http",
     "security",
     "codelens",
-    "rest client"
+    "rest client",
+    "fastify",
+    "koa",
+    "breaking changes",
+    "fetch",
+    "axios"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -54,8 +59,8 @@
   ],
   "capabilities": {
     "untrustedWorkspaces": {
-      "supported": true,
-      "description": "API Shadow only reads source files and never executes workspace code, so it is safe in Restricted Mode."
+      "supported": "limited",
+      "description": "API Shadow only reads source files and never executes workspace code. Comparing the API with a git branch runs git, so it needs a trusted workspace."
     },
     "virtualWorkspaces": {
       "supported": false,
@@ -91,7 +96,7 @@
     "viewsWelcome": [
       {
         "view": "apiShadow.endpoints",
-        "contents": "Open a folder that contains an Express, NestJS or Spring Boot project to discover its API endpoints.\n[Open Folder](command:workbench.action.files.openFolder)",
+        "contents": "Open a folder that contains an Express, Fastify, Koa, NestJS or Spring Boot project to discover its API endpoints.\n[Open Folder](command:workbench.action.files.openFolder)",
         "when": "workbenchState == empty"
       },
       {
@@ -101,7 +106,7 @@
       },
       {
         "view": "apiShadow.endpoints",
-        "contents": "No API endpoints were found.\nAPI Shadow supports Express, NestJS and Spring Boot (Java). Check the Issues view for files that could not be analyzed.\n[Refresh](command:apiShadow.refresh)\n[Show Log](command:apiShadow.showLog)",
+        "contents": "No API endpoints were found.\nAPI Shadow supports Express, Fastify, Koa, NestJS and Spring Boot (Java). Check the Issues view for files that could not be analyzed.\n[Refresh](command:apiShadow.refresh)\n[Show Log](command:apiShadow.showLog)",
         "when": "workbenchState != empty && apiShadow.ready && !apiShadow.hasEndpoints"
       },
       {
@@ -213,6 +218,24 @@
         "command": "apiShadow.endpointActions",
         "title": "Endpoint Actions",
         "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.showFlow",
+        "title": "Show Request Flow",
+        "category": "API Shadow",
+        "icon": "$(type-hierarchy)"
+      },
+      {
+        "command": "apiShadow.showCallers",
+        "title": "Show Callers",
+        "category": "API Shadow",
+        "icon": "$(references)"
+      },
+      {
+        "command": "apiShadow.compareWithRef",
+        "title": "Compare API with Branch or Tag…",
+        "category": "API Shadow",
+        "icon": "$(git-compare)"
       }
     ],
     "menus": {
@@ -246,6 +269,11 @@
           "command": "apiShadow.refresh",
           "when": "view == apiShadow.endpoints",
           "group": "navigation@6"
+        },
+        {
+          "command": "apiShadow.compareWithRef",
+          "when": "view == apiShadow.endpoints",
+          "group": "compare@1"
         },
         {
           "command": "apiShadow.exportMarkdown",
@@ -318,6 +346,16 @@
           "command": "apiShadow.copyCurl",
           "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
           "group": "2_copy@3"
+        },
+        {
+          "command": "apiShadow.showFlow",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "1_navigation@3"
+        },
+        {
+          "command": "apiShadow.showCallers",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "1_navigation@4"
         }
       ],
       "commandPalette": [
@@ -356,12 +394,16 @@
             "type": "string",
             "enum": [
               "express",
+              "fastify",
+              "koa",
               "nestjs",
               "spring"
             ]
           },
           "default": [
             "express",
+            "fastify",
+            "koa",
             "nestjs",
             "spring"
           ],
@@ -379,7 +421,7 @@
         "apiShadow.includeTestFiles": {
           "type": "boolean",
           "default": false,
-          "markdownDescription": "Analyze test files (`*.spec.ts`, `*.test.js`, `__tests__/`, `src/test/`)."
+          "markdownDescription": "Treat test files (`*.spec.ts`, `*.test.js`, `__tests__/`, `test/`, `src/test/`) like other sources, so routes declared in them are shown as endpoints."
         },
         "apiShadow.respectFilesExclude": {
           "type": "boolean",
@@ -524,7 +566,42 @@
         "apiShadow.requests.baseUrl": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Base URL for **Try it**, **Copy as cURL** and `.http` exports, e.g. `https://staging.example.com`. When empty, `http://localhost:<port>` is used with the port from `app.listen()` or `server.port`, falling back to 3000 (Express, NestJS) or 8080 (Spring)."
+          "markdownDescription": "Base URL for **Try it**, **Copy as cURL** and `.http` exports, e.g. `https://staging.example.com`. When empty, `http://localhost:<port>` is used with the port from `app.listen()` or `server.port`, falling back to 3000 (Express, Fastify, Koa, NestJS) or 8080 (Spring)."
+        },
+        "apiShadow.unreachable.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Report routes that can never run because a route registered earlier on the same router matches every request they would get (Express, Koa, NestJS), e.g. `GET /users/:id` declared before `GET /users/me`."
+        },
+        "apiShadow.diagnostics.unreachable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show unreachable routes in the Problems panel."
+        },
+        "apiShadow.clientCalls.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Find HTTP calls in frontend and test code (`fetch`, axios, ky, Angular `HttpClient`, supertest, MockMvc) and link them to endpoints: go to definition, hovers, caller counts and calls to missing routes."
+        },
+        "apiShadow.clientCalls.reportUncalled": {
+          "type": "boolean",
+          "default": false,
+          "description": "List endpoints that no code in the workspace calls in the Issues view (only for projects whose endpoints are called from somewhere)."
+        },
+        "apiShadow.diagnostics.brokenCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Underline calls to routes that do not exist in the Problems panel."
+        },
+        "apiShadow.tests.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Read test files for endpoint test coverage. Routes declared in tests are not shown unless `#apiShadow.includeTestFiles#` is on."
+        },
+        "apiShadow.validation.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Detect whether request bodies are validated (validation middleware, schema checks, NestJS pipes, @Valid, Fastify schemas) and report unvalidated ones in projects that validate others."
         }
       }
     }
@@ -546,7 +623,7 @@
     "test:all": "npm run typecheck && npm run lint && npm run test:unit && npm run test:integration && npm run test:e2e",
     "package": "vsce package --no-dependencies",
     "publish": "vsce publish --no-dependencies",
-    "test:e2e:vsix": "npm run package && cross-env API_SHADOW_VSIX=api-shadow-0.2.0.vsix playwright test",
+    "test:e2e:vsix": "npm run package && cross-env API_SHADOW_VSIX=api-shadow-0.3.0.vsix playwright test",
     "screenshots": "npm run package && playwright test -c scripts/screenshots/playwright.config.ts"
   },
   "dependencies": {

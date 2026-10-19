@@ -12,5 +12,7 @@ exports.create = async (req, res) => {
   res.status(201).json(await userService.create(req.body));
 };
 
+exports.me = async (req, res) => res.json(req.user);
+
 exports.uploadAvatar = (req, res) => res.sendStatus(204);
 exports.removeAvatar = (req, res) => res.sendStatus(204);

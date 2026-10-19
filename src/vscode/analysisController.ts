@@ -67,6 +67,11 @@ export class AnalysisController implements vscode.Disposable {
     return this.config;
   }
 
+  /** Options for a separate engine (e.g. analyzing a git revision) with the current settings. */
+  engineOptionsSnapshot(): EngineOptions {
+    return this.engineOptions();
+  }
+
   private engineOptions(): EngineOptions {
     return {
       frameworks: this.config.frameworks,
@@ -74,6 +79,10 @@ export class AnalysisController implements vscode.Disposable {
       maxFileSizeBytes: this.config.maxFileSizeKB * 1024,
       springApplyContextPath: this.config.springApplyContextPath,
       auth: this.config.auth,
+      includeTestFiles: this.config.includeTestFiles,
+      clientCalls: { enabled: this.config.clientCalls, reportUncalled: this.config.reportUncalled },
+      validation: this.config.validation,
+      unreachable: this.config.unreachable,
       workspaceRoots: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
     };
   }
@@ -138,7 +147,7 @@ export class AnalysisController implements vscode.Disposable {
   private async runOnce(cts: vscode.CancellationTokenSource, full: boolean): Promise<void> {
     if (cts.token.isCancellationRequested) return;
     if (!vscode.workspace.workspaceFolders?.length) {
-      this.publish({ endpoints: [], issues: [], duplicates: [], servers: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
+      this.publish({ endpoints: [], issues: [], duplicates: [], servers: [], clientCalls: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
       return;
     }
     await this.loadPersistedCache();

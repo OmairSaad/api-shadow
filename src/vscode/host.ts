@@ -22,7 +22,8 @@ export class VscodeFileHost implements FileHost {
 
   private buildExcluder(): PathExcluder {
     const extra = [...this.config.exclude, ...(this.config.respectFilesExclude ? filesExcludeGlobs() : [])];
-    return new PathExcluder(defaultExcludeGlobs(this.config.includeTestFiles, extra));
+    const tests = this.config.includeTestFiles ? 'include' : this.config.testCoverage ? 'read' : 'exclude';
+    return new PathExcluder(defaultExcludeGlobs(tests, extra));
   }
 
   /** True when a file (by absolute URI) should not be analysed. */

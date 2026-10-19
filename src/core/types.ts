@@ -3,7 +3,9 @@
  * is free of `vscode` imports so it can be unit-tested in plain Node.
  */
 
-export type Framework = 'express' | 'nestjs' | 'spring';
+export type Framework = 'express' | 'fastify' | 'koa' | 'nestjs' | 'spring';
+
+export const FRAMEWORKS: readonly Framework[] = ['express', 'fastify', 'koa', 'nestjs', 'spring'];
 
 /** `ALL` means the route matches every HTTP method (Express `all`, Nest `@All`, Spring mapping without `method`). */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD' | 'ALL';
@@ -96,6 +98,13 @@ export interface Endpoint {
   markers?: string[];
   /** Filled in after linking; see {@link EndpointAuth}. */
   auth?: EndpointAuth;
+  /**
+   * For endpoints that accept a request body: whether it is validated (validation middleware,
+   * pipes, `@Valid`, or a schema check of the body in the handler), and by what.
+   */
+  validation?: { status: 'validated' | 'missing'; via: string[] };
+  /** Calls to this endpoint found in the workspace (filled in after linking). */
+  usage?: { calls: number; tests: number };
   services: ServiceRef[];
   parameters: EndpointParameter[];
   /** Source-level request body type name (Nest `@Body()`, Spring `@RequestBody`). */
@@ -116,7 +125,7 @@ export interface Endpoint {
   projectRoot: string;
 }
 
-export type IssueKind = 'duplicate' | 'no-auth' | 'limitation' | 'parse-error' | 'skipped';
+export type IssueKind = 'duplicate' | 'unreachable' | 'broken-call' | 'no-auth' | 'no-validation' | 'uncalled' | 'limitation' | 'parse-error' | 'skipped';
 export type IssueSeverity = 'info' | 'warning' | 'error';
 
 export interface AnalysisIssue {
@@ -126,6 +135,25 @@ export interface AnalysisIssue {
   location?: SourceLocation;
   /** Endpoint ids related to this issue (duplicates). */
   endpointIds?: string[];
+  /** Other locations involved, e.g. the route that shadows an unreachable one. */
+  related?: { location: SourceLocation; message: string }[];
+}
+
+/** An HTTP call to an API in the workspace: frontend code (`fetch`, axios, ...) or a test. */
+export interface ClientCall {
+  id: string;
+  kind: 'app' | 'test';
+  /** Library, e.g. `fetch`, `axios`, `HttpClient`, `supertest`, `MockMvc`. */
+  client: string;
+  /** `ALL` when the method could not be determined. */
+  method: HttpMethod;
+  /** The URL as written, unresolved parts shown as `${expr}`. */
+  url: string;
+  location: SourceLocation;
+  /** Range of the URL argument, for go-to-definition and hovers. */
+  range: { start: SourceLocation; end: SourceLocation };
+  /** Endpoints this call most likely reaches (best matches only). */
+  endpointIds: string[];
 }
 
 export interface DuplicateGroup {
@@ -156,6 +184,7 @@ export interface AnalysisResult {
   issues: AnalysisIssue[];
   duplicates: DuplicateGroup[];
   servers: ServerInfo[];
+  clientCalls: ClientCall[];
   stats: AnalysisStats;
 }
 

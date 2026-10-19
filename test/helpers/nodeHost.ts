@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AnalysisEngine, type EngineOptions, type FileHost } from '../../src/core/engine';
 import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, defaultExcludeGlobs, globToRegExp } from '../../src/core/exclude';
-import type { Framework } from '../../src/core/types';
+import { FRAMEWORKS, type Framework } from '../../src/core/types';
 
 /** File host backed by the real file system; mirrors what the VS Code host does with findFiles. */
 export class NodeFileHost implements FileHost {
@@ -14,7 +14,7 @@ export class NodeFileHost implements FileHost {
     private readonly root: string,
     options: { includeTests?: boolean; exclude?: string[] } = {},
   ) {
-    this.excluder = new PathExcluder(defaultExcludeGlobs(options.includeTests ?? false, options.exclude ?? []));
+    this.excluder = new PathExcluder(defaultExcludeGlobs(options.includeTests ? 'include' : 'read', options.exclude ?? []));
   }
 
   async listFiles(): Promise<string[]> {
@@ -51,7 +51,7 @@ export class NodeFileHost implements FileHost {
 
 export function engineOptions(root: string, overrides: Partial<EngineOptions> = {}): EngineOptions {
   return {
-    frameworks: new Set<Framework>(['express', 'nestjs', 'spring']),
+    frameworks: new Set<Framework>(FRAMEWORKS),
     maxFiles: 20000,
     maxFileSizeBytes: 512 * 1024,
     springApplyContextPath: true,

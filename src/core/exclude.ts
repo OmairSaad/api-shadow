@@ -31,12 +31,27 @@ export const SOURCE_GLOB = '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java,kt}';
 export const CONFIG_GLOB = '**/application.{properties,yml,yaml}';
 export const MARKER_GLOB = '**/{package.json,pom.xml,build.gradle,build.gradle.kts}';
 
-const TEST_PATTERNS = ['**/*.{spec,test}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}', '**/__tests__/**', '**/src/test/**', '**/test/fixtures/**'];
+/** Test sources: read for test coverage, but their routes are not endpoints (unless asked). */
+const TEST_SOURCE_PATTERNS = ['**/*.{spec,test}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}', '**/*.e2e-spec.{js,ts}', '**/__tests__/**', '**/src/test/**', '**/test/**/*.{js,cjs,mjs,ts,cts,mts}', '**/tests/**/*.{js,cjs,mjs,ts,cts,mts}'];
+const FIXTURE_PATTERNS = ['**/test/fixtures/**', '**/__fixtures__/**'];
 
-export function defaultExcludeGlobs(includeTests: boolean, extra: string[]): string[] {
+/**
+ * @param tests `exclude`: skip test files entirely; `read`: list them (for test coverage) but keep
+ *   fixtures out; `include`: treat them like any other source.
+ */
+export function defaultExcludeGlobs(tests: 'exclude' | 'read' | 'include', extra: string[]): string[] {
   const globs = [`**/{${DEFAULT_EXCLUDED_DIRS.join(',')}}/**`, '**/*.d.ts', '**/*.min.js', '**/*.bundle.js'];
-  if (!includeTests) globs.push(...TEST_PATTERNS);
+  if (tests === 'exclude') globs.push(...TEST_SOURCE_PATTERNS, ...FIXTURE_PATTERNS);
+  if (tests === 'read') globs.push(...FIXTURE_PATTERNS);
   return [...globs, ...extra.filter((g) => g.trim().length > 0)];
+}
+
+const TEST_SOURCE_RES = TEST_SOURCE_PATTERNS.map((g) => globToRegExp(g));
+
+/** True for test sources (by path, `/`- or `\\`-separated, absolute or relative). */
+export function isTestPath(file: string): boolean {
+  const p = file.replace(/\\/g, '/');
+  return TEST_SOURCE_RES.some((re) => re.test(p));
 }
 
 /** Converts a VS Code-style glob (`**`, `*`, `?`, `{a,b}`, `[abc]`) to a RegExp matching `/`-separated paths. */

@@ -27,6 +27,7 @@ describe('Express fixture project', async () => {
         'GET /users',
         'POST /users',
         'GET /users/:id',
+        'GET /users/me',
         'PUT /users/:id/avatar',
         'DELETE /users/:id/avatar',
         'GET /users/:userId',
@@ -41,7 +42,7 @@ describe('Express fixture project', async () => {
   it('records source location of the route declaration', () => {
     const e = find(express, 'POST', '/users');
     expect(path.relative(root, e.location.file)).toBe(path.join('src', 'routes', 'users.js'));
-    expect(e.location.line).toBe(9);
+    expect(e.location.line).toBe(11);
   });
 
   it('accumulates app, mount and route middleware in order', () => {

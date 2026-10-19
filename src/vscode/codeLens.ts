@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { authLabel } from '../core/auth';
-import type { AnalysisResult, Endpoint } from '../core/types';
+import type { AnalysisIssue, AnalysisResult, ClientCall, Endpoint } from '../core/types';
 
 /** How far (in lines) to look for an endpoint's declaration after unsaved edits moved it. */
 const ANCHOR_SEARCH_LINES = 200;
@@ -17,6 +17,11 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
   private byFile = new Map<string, Endpoint[]>();
   private duplicateIds = new Set<string>();
   private noAuthIds = new Set<string>();
+  private noValidationIds = new Set<string>();
+  private unreachable = new Map<string, AnalysisIssue>();
+  private callsByFile = new Map<string, ClientCall[]>();
+  private endpointById = new Map<string, Endpoint>();
+  private hasCalls = false;
   /** endpoint id -> text of its declaration line in the saved file */
   private readonly anchors = new Map<string, string>();
 
@@ -31,6 +36,12 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
     }
     this.duplicateIds = new Set(result.duplicates.flatMap((d) => d.endpointIds));
     this.noAuthIds = new Set(result.issues.filter((i) => i.kind === 'no-auth').flatMap((i) => i.endpointIds ?? []));
+    this.noValidationIds = new Set(result.issues.filter((i) => i.kind === 'no-validation').flatMap((i) => i.endpointIds ?? []));
+    this.unreachable = new Map(result.issues.filter((i) => i.kind === 'unreachable').map((i) => [i.endpointIds![0], i]));
+    this.callsByFile = new Map();
+    for (const c of result.clientCalls) this.callsByFile.set(c.location.file, [...(this.callsByFile.get(c.location.file) ?? []), c]);
+    this.endpointById = new Map(result.endpoints.map((e) => [e.id, e]));
+    this.hasCalls = result.clientCalls.length > 0;
     this.anchors.clear();
     this.emitter.fire();
   }
@@ -42,9 +53,8 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
 
   provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
     if (!this.isEnabled() || document.uri.scheme !== 'file') return [];
-    const endpoints = this.byFile.get(document.uri.fsPath);
-    if (!endpoints) return [];
-    const lenses: vscode.CodeLens[] = [];
+    const lenses: vscode.CodeLens[] = this.clientCallLenses(document);
+    const endpoints = this.byFile.get(document.uri.fsPath) ?? [];
     for (const e of endpoints) {
       const line = this.lineFor(document, e);
       if (line === undefined) continue;
@@ -57,11 +67,40 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
       else if (e.auth?.status === 'public') add(`$(unlock) Public`, `Explicitly public: ${e.auth.via.join(', ')}`);
       else if (e.auth?.status === 'central') add(`$(shield) ${e.auth.via[0]}`, 'Security is configured centrally; per-path rules are not analyzed. Click to open.', 'apiShadow.openLocation', [e.auth.location]);
       else if (this.noAuthIds.has(e.id)) add('$(warning) No auth found', 'No auth middleware, guard or annotation was found, but other endpoints in this project have one.', 'apiShadow.issues.focus');
+      const unreachable = this.unreachable.get(e.id);
+      if (unreachable) add('$(error) Unreachable', unreachable.message + ' Click to open that route.', 'apiShadow.openLocation', [unreachable.related?.[0]?.location]);
       if (this.duplicateIds.has(e.id)) add('$(warning) Duplicate route', 'Another endpoint in this project matches the same method and path. See the Issues view.', 'apiShadow.issues.focus');
+      if (this.noValidationIds.has(e.id)) add('$(circle-slash) Body not validated', 'The request body is not validated, but other endpoints in this project validate theirs.', 'apiShadow.issues.focus');
+      if (e.usage && (this.hasCalls || e.usage.calls + e.usage.tests > 0)) {
+        const n = e.usage.calls + e.usage.tests;
+        const parts = [e.usage.calls ? plural(e.usage.calls, 'caller') : '', e.usage.tests ? plural(e.usage.tests, 'test') : ''].filter(Boolean);
+        const text = n === 0 ? '$(circle-slash) No callers' : `$(references) ${parts.join(' · ')}`;
+        add(text, n === 0 ? 'Nothing in the workspace calls this endpoint' : 'Show the code and tests that call this endpoint', n === 0 ? '' : 'apiShadow.showCallers', [e]);
+      }
       add('$(play) Try it', 'Open a ready-to-send request for this endpoint (.http)', 'apiShadow.openRequest', [e]);
       add('$(copy) cURL', 'Copy as a cURL command', 'apiShadow.copyCurl', [e]);
     }
     return lenses;
+  }
+
+  /** Above each HTTP call in frontend and test code: the endpoint it reaches. */
+  private clientCallLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    if (document.isDirty) return [];
+    const out: vscode.CodeLens[] = [];
+    for (const call of this.callsByFile.get(document.uri.fsPath) ?? []) {
+      const line = call.location.line - 1;
+      if (line >= document.lineCount) continue;
+      const range = new vscode.Range(line, 0, line, 0);
+      const targets = call.endpointIds.map((id) => this.endpointById.get(id)).filter((e): e is Endpoint => !!e);
+      // Calls to missing routes are underlined in the editor (Problems panel) instead.
+      if (targets.length === 0) continue;
+      for (const e of targets.slice(0, 2)) {
+        const handler = e.controller && e.handler && !e.handler.startsWith('(') ? ` · ${e.controller}.${e.handler}` : '';
+        out.push(new vscode.CodeLens(range, { title: `$(arrow-right) ${e.method} ${e.path}${handler}`, tooltip: 'API Shadow: go to the route handler', command: 'apiShadow.openLocation', arguments: [e.handlerLocation ?? e.location] }));
+      }
+      if (targets.length > 2) out.push(new vscode.CodeLens(range, { title: `+${targets.length - 2} more`, command: '' }));
+    }
+    return out;
   }
 
   private lineFor(document: vscode.TextDocument, e: Endpoint): number | undefined {
@@ -84,4 +123,8 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
   dispose(): void {
     this.emitter.dispose();
   }
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? '' : 's'}`;
 }

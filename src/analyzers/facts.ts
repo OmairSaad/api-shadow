@@ -6,7 +6,7 @@
 import type { EndpointParameter, HttpMethod, PathExpr, ServiceCall } from '../core/types';
 
 /** Bump whenever the facts shape or extraction semantics change, to invalidate persisted caches. */
-export const FACTS_VERSION = 7;
+export const FACTS_VERSION = 8;
 
 export interface Pos {
   line: number;
@@ -39,9 +39,15 @@ export type RefExpr =
   /** A class declared in this file. */
   | { k: 'class'; name: string };
 
+/** Router library of a node; `param` nodes take it from whatever they are attached to. */
+export type RouterLib = 'express' | 'fastify' | 'koa';
+
 export interface RouterNodeFact {
   key: string;
   kind: 'app' | 'router' | 'param';
+  lib?: RouterLib;
+  /** Prefix applied to every route of the router (`new Router({ prefix })`, `router.prefix()`). */
+  prefix?: PathExpr;
   /** Variable name as written. */
   name: string;
   pos: Pos;
@@ -59,6 +65,10 @@ export interface HandlerFact {
   pos: Pos;
   /** Service calls found in an inline handler body. */
   serviceCalls: ServiceCall[];
+  /** Parameter count of an inline handler (Express passes `next` third, Koa second). */
+  arity?: number;
+  /** Inline handler checks the request body against a schema (`schema.parse(req.body)`). */
+  validatesBody?: boolean;
 }
 
 export interface ExpressRouteFact {
@@ -67,6 +77,8 @@ export interface ExpressRouteFact {
   paths: PathExpr[];
   middleware: string[];
   handler?: HandlerFact;
+  /** Fastify route options declare a body schema. */
+  bodySchema?: boolean;
   pos: Pos;
   order: number;
 }
@@ -97,6 +109,8 @@ export interface ExpressInjectionFact {
   argIndex: number;
   parent: RefExpr;
   pos: Pos;
+  /** Prefix for routes the function registers (Fastify `register(plugin, { prefix })`). */
+  paths?: PathExpr[];
 }
 
 export interface CallableFact {
@@ -108,6 +122,10 @@ export interface CallableFact {
   /** What the function returns when it is a router factory. */
   returns?: RefExpr;
   serviceCalls: ServiceCall[];
+  /** Parameter count. */
+  arity?: number;
+  /** Checks the request body against a schema. */
+  validatesBody?: boolean;
 }
 
 export interface ClassFact {
@@ -135,6 +153,8 @@ export interface NestMethodFact {
   markers: string[];
   params: NestParamFact[];
   bodyType?: string;
+  /** Pipes passed to `@Body(...)`. */
+  bodyPipes?: string[];
   serviceCalls: ServiceCall[];
 }
 
@@ -166,7 +186,7 @@ export interface NestVersioningFact {
 /** A guard applied to every route: `app.useGlobalGuards(new X())` or `{ provide: APP_GUARD, useClass: X }`. */
 export interface NestGlobalGuardFact {
   name: string;
-  via: 'useGlobalGuards' | 'APP_GUARD';
+  via: 'useGlobalGuards' | 'APP_GUARD' | 'useGlobalPipes' | 'APP_PIPE';
   pos: Pos;
 }
 
@@ -180,6 +200,19 @@ export interface NestRouterModuleRoute {
   path: string;
   module?: string;
   children: NestRouterModuleRoute[];
+}
+
+/** An outgoing HTTP call (`fetch('/api/x')`, `axios.post(url)`, `request(app).get('/x')`). */
+export interface ClientCallFact {
+  client: string;
+  /** Undefined when the method could not be determined. */
+  method?: HttpMethod;
+  url: PathExpr;
+  /** The URL is relative to a base we can't see (an axios instance, an injected client). */
+  unknownBase?: boolean;
+  pos: Pos;
+  start: Pos;
+  end: Pos;
 }
 
 export interface JsFileFacts {
@@ -199,6 +232,9 @@ export interface JsFileFacts {
   nestModules: NestModuleFact[];
   nestRouterModule: NestRouterModuleRoute[];
   nestGlobalGuards: NestGlobalGuardFact[];
+  /** `app.useGlobalPipes(new ValidationPipe())` and `{ provide: APP_PIPE, ... }`. */
+  nestGlobalPipes: NestGlobalGuardFact[];
+  clientCalls: ClientCallFact[];
   /**
    * Exported string constants, for path parts that reference imports. Keys are export names,
    * with members joined by dots: `ROUTES.SHOPIFY`, `default.BASE`, and plain keys for
@@ -228,6 +264,8 @@ export interface JavaMethodFact {
   security: string[];
   params: EndpointParameter[];
   bodyType?: string;
+  /** The `@RequestBody` parameter is annotated `@Valid` / `@Validated`. */
+  bodyValidated?: boolean;
   calls: ServiceCall[];
 }
 
@@ -258,6 +296,8 @@ export interface JavaFileFacts {
   classes: JavaClassFact[];
   /** `Class.CONSTANT` (and `Outer.Inner.CONSTANT`) -> expression */
   constants: Record<string, PathExpr>;
+  /** MockMvc / WebTestClient / TestRestTemplate calls. */
+  clientCalls: ClientCallFact[];
   /** A class that configures Spring Security (`SecurityFilterChain` bean, `@EnableWebSecurity`, ...). */
   securityConfig?: { className: string; pos: Pos };
   issues: FileIssue[];

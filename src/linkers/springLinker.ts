@@ -215,6 +215,7 @@ export class SpringLinker {
               services: this.services(implMethod, implFile === entry.file ? entry : owner),
               parameters: method.params,
               requestBodyType: method.bodyType,
+              validation: method.bodyType && (method.bodyValidated || impl?.bodyValidated) ? { status: 'validated', via: ['@Valid'] } : undefined,
               conditions: conditions.length ? conditions : undefined,
               notes,
               projectRoot: this.ctx.projectRootOf(entry.file),

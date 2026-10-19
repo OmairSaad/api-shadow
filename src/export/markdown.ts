@@ -78,7 +78,24 @@ export function toMarkdown(result: AnalysisResult, options: ExportOptions): stri
     lines.push('');
   }
 
-  const limitations = result.issues.filter((i) => i.kind !== 'duplicate' && i.kind !== 'no-auth');
+  const sections: [string, string][] = [
+    ['unreachable', 'Unreachable routes'],
+    ['broken-call', 'Calls to missing routes'],
+    ['no-validation', 'Request bodies without validation'],
+    ['uncalled', 'Endpoints nothing calls'],
+  ];
+  for (const [kind, title] of sections) {
+    const list = result.issues.filter((i) => i.kind === kind);
+    if (list.length === 0) continue;
+    lines.push(`## ${title}`, '');
+    for (const i of list) {
+      const where = includeLoc && i.location ? ` (${options.relativePath(i.location.file)}:${i.location.line})` : '';
+      lines.push(`- ${escapeCell(i.message)}${where}`);
+    }
+    lines.push('');
+  }
+
+  const limitations = result.issues.filter((i) => i.kind === 'limitation' || i.kind === 'parse-error' || i.kind === 'skipped');
   if (limitations.length > 0) {
     lines.push('## Analysis notes and limitations', '');
     for (const i of limitations) {

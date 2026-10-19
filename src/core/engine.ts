@@ -12,6 +12,10 @@ import { ExpressLinker } from '../linkers/expressLinker';
 import { NestLinker } from '../linkers/nestLinker';
 import { SpringLinker } from '../linkers/springLinker';
 import { applyAuth, DEFAULT_AUTH_OPTIONS, type AuthOptions, type CentralSecurity } from './auth';
+import { matchClientCalls, type ClientCallInput, type ClientCallOptions } from './clientCalls';
+import { isTestPath } from './exclude';
+import { findUnreachable } from './shadowing';
+import { applyValidation } from './validation';
 import { findDuplicates } from './duplicates';
 import { compareEndpoints } from '../export/markdown';
 import {
@@ -47,6 +51,14 @@ export interface EngineOptions {
   workspaceRoots: string[];
   /** Auth detection; defaults to {@link DEFAULT_AUTH_OPTIONS}. */
   auth?: AuthOptions;
+  /** Treat test files like other sources (their routes become endpoints). Default false. */
+  includeTestFiles?: boolean;
+  /** Frontend and test calls to endpoints. Default: enabled, uncalled endpoints not reported. */
+  clientCalls?: ClientCallOptions;
+  /** Request body validation detection. Default true. */
+  validation?: boolean;
+  /** Unreachable route detection. Default true. */
+  unreachable?: boolean;
 }
 
 interface CacheEntry {
@@ -160,8 +172,12 @@ export class AnalysisEngine {
     const files = this.files;
     const allFiles = new Set(files);
     const enabled = this.options.frameworks;
-    const wantsJs = enabled.has('express') || enabled.has('nestjs');
+    const clientCalls = this.options.clientCalls ?? { enabled: true, reportUncalled: false };
+    const jsFrameworks = enabled.has('express') || enabled.has('fastify') || enabled.has('koa') || enabled.has('nestjs');
+    // Frontend code may call a Spring API, so JS is read for client calls even without JS frameworks.
+    const wantsJs = jsFrameworks || clientCalls.enabled;
     const wantsJava = enabled.has('spring');
+    const isTest = (f: string): boolean => !this.options.includeTestFiles && this.isTestFile(f);
 
     let analyzed = 0;
     let fromCache = 0;
@@ -190,13 +206,14 @@ export class AnalysisEngine {
       const factMap = new Map<string, FileFacts>();
       for (const f of relevant) {
         const e = this.cache.get(f);
-        if (e?.facts) factMap.set(f, e.facts);
+        // Test files only contribute calls; routes of test apps are not endpoints.
+        if (e?.facts && !isTest(f)) factMap.set(f, e.facts);
       }
       ctx = new LinkContext(factMap, allFiles, (f) => this.projectRootOf(f), {
         springApplyContextPath: this.options.springApplyContextPath,
       });
       endpoints = [];
-      if (enabled.has('express')) endpoints.push(...new ExpressLinker(ctx).link());
+      if (enabled.has('express') || enabled.has('fastify') || enabled.has('koa')) endpoints.push(...new ExpressLinker(ctx).link().filter((e) => enabled.has(e.framework)));
       if (enabled.has('nestjs')) endpoints.push(...new NestLinker(ctx).link());
       if (enabled.has('spring')) endpoints.push(...new SpringLinker(ctx).link());
       const requested = [...ctx.requested].filter((f) => !this.cache.get(f)?.facts);
@@ -215,9 +232,17 @@ export class AnalysisEngine {
     let firstKotlin: string | undefined;
     const centralSecurity = new Map<string, CentralSecurity>();
     const servers = new Map<string, ServerInfo>();
+    const callInputs: ClientCallInput[] = [];
     for (const f of relevant) {
       const facts = this.cache.get(f)?.facts;
       if (!facts) continue;
+      if (facts.lang === 'js' || facts.lang === 'java') {
+        for (const fact of facts.clientCalls ?? []) {
+          const test = this.isTestFile(f) || fact.client === 'supertest' || fact.client === 'MockMvc' || fact.client === 'WebTestClient' || fact.client === 'TestRestTemplate';
+          callInputs.push({ file: f, fact, kind: test ? 'test' : 'app' });
+        }
+      }
+      if (isTest(f)) continue;
       const root = this.projectRootOf(f);
       if (facts.lang === 'java' && facts.securityConfig && !centralSecurity.has(root)) {
         centralSecurity.set(root, { name: facts.securityConfig.className, location: loc(f, facts.securityConfig.pos) });
@@ -246,6 +271,10 @@ export class AnalysisEngine {
     const dup = findDuplicates(endpoints);
     issues.push(...dup.issues);
     issues.push(...applyAuth(endpoints, this.options.auth ?? DEFAULT_AUTH_OPTIONS, centralSecurity));
+    if (this.options.unreachable !== false && ctx) issues.push(...findUnreachable(endpoints, ctx.registrations));
+    issues.push(...applyValidation(endpoints, this.options.validation !== false));
+    const calls = matchClientCalls(callInputs, endpoints, clientCalls);
+    issues.push(...calls.issues);
     endpoints.sort(compareEndpoints);
     const durationMs = Date.now() - started;
     this.logger.info(`Analysis finished in ${durationMs} ms: ${endpoints.length} endpoint(s), ${analyzed} file(s) parsed, ${fromCache} from cache.`);
@@ -254,6 +283,7 @@ export class AnalysisEngine {
       issues: dedupeIssues(issues),
       duplicates: dup.groups,
       servers: [...servers.values()].sort((a, b) => a.projectRoot.localeCompare(b.projectRoot)),
+      clientCalls: calls.calls,
       stats: { filesDiscovered: files.length, filesAnalyzed: analyzed, filesFromCache: fromCache, filesSkipped: skipped, durationMs, truncated },
     };
   }
@@ -318,6 +348,12 @@ export class AnalysisEngine {
       this.logger.error(`Analyzer failed on ${file}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
       return { lang: 'none', issues: [{ kind: 'parse-error', severity: 'error', message: 'Internal analyzer error; see the API Shadow log.' }] };
     }
+  }
+
+  /** Test files by their path inside the workspace folder (so a folder named `test` above it doesn't count). */
+  private isTestFile(file: string): boolean {
+    const root = this.options.workspaceRoots.filter((r) => file.startsWith(r)).sort((a, b) => b.length - a.length)[0];
+    return isTestPath(root ? path.relative(root, file) : file);
   }
 
   projectRootOf(file: string): string {

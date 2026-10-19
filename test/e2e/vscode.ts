@@ -34,7 +34,7 @@ export async function launchVSCode(options: LaunchOptions = {}): Promise<VSCodeS
   const executablePath = await downloadAndUnzipVSCode({ version: process.env.VSCODE_TEST_VERSION ?? 'stable', cachePath: path.join(EXTENSION_ROOT, '.vscode-test') });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'api-shadow-e2e-'));
   const workspace = path.join(tmp, options.workspaceName ?? 'workspace');
-  for (const name of ['express-app', 'nest-app', 'spring-app']) {
+  for (const name of ['express-app', 'nest-app', 'spring-app', 'web-app']) {
     fs.cpSync(path.join(EXTENSION_ROOT, 'test/fixtures', name), path.join(workspace, name), { recursive: true });
   }
   options.prepareWorkspace?.(workspace);

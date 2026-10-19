@@ -5,7 +5,7 @@
 import type { Endpoint, EndpointParameter, Framework, ServerInfo } from '../core/types';
 import { compareEndpoints } from './markdown';
 
-const DEFAULT_PORTS: Record<Framework, number> = { express: 3000, nestjs: 3000, spring: 8080 };
+const DEFAULT_PORTS: Record<Framework, number> = { express: 3000, fastify: 3000, koa: 3000, nestjs: 3000, spring: 8080 };
 const BODY_METHODS = new Set(['POST', 'PUT', 'PATCH']);
 
 export interface BaseUrlOptions {

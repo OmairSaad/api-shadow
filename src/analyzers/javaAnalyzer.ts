@@ -5,7 +5,7 @@
 import { parse, type CstNode, type IToken } from 'java-parser';
 import type { EndpointParameter, HttpMethod, PathExpr, PathPart, ServiceCall } from '../core/types';
 import { compactExpr } from '../core/paths';
-import type { JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, Pos } from './facts';
+import type { ClientCallFact, JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, Pos } from './facts';
 import { own, table } from '../core/records';
 
 type CstElement = CstNode | IToken;
@@ -28,7 +28,7 @@ const REQUEST_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIO
 
 /** Quick textual check used to decide whether a Java file is worth parsing in the first pass. */
 export function isJavaCandidate(source: string): boolean {
-  return /@(Rest)?Controller\b|Mapping\b|SecurityFilterChain\b|SecurityWebFilterChain\b|EnableWeb(Flux)?Security\b|WebSecurityConfigurerAdapter\b/.test(source);
+  return /@(Rest)?Controller\b|Mapping\b|MockMvc|WebTestClient|TestRestTemplate|SecurityFilterChain\b|SecurityWebFilterChain\b|EnableWeb(Flux)?Security\b|WebSecurityConfigurerAdapter\b/.test(source);
 }
 
 function isToken(el: CstElement): el is IToken {
@@ -136,6 +136,7 @@ export function analyzeJava(source: string, _filePath: string): JavaFileFacts {
     staticImports: {},
     classes: [],
     constants: {},
+    clientCalls: [],
     issues: [],
   };
   let cst: CstNode;
@@ -153,6 +154,7 @@ export function analyzeJava(source: string, _filePath: string): JavaFileFacts {
     return facts;
   }
   new JavaWalker(source, facts).run(cst);
+  facts.clientCalls = findClientCalls(tokensOf(cst), facts.staticImports);
   return facts;
 }
 
@@ -444,6 +446,7 @@ class JavaWalker {
     if (returnType && SECURITY_CONFIG_TYPES.has(returnType)) this.facts.securityConfig ??= { className: cls.name, pos: tokenPos(nameTok) };
     const params: EndpointParameter[] = [];
     let bodyType: string | undefined;
+    let bodyValidated: boolean | undefined;
     for (const fp of kidNodes(kid(declarator, 'formalParameterList'), 'formalParameter')) {
       const regular = kid(fp, 'variableParaRegularParameter') ?? kid(fp, 'variableArityParameter');
       if (!regular) continue;
@@ -463,6 +466,7 @@ class JavaWalker {
         const name = explicitName ?? paramName;
         if (ann.name === 'RequestBody') {
           bodyType = type ?? 'object';
+          if (paramAnns.some((a) => a.name === 'Valid' || a.name === 'Validated')) bodyValidated = true;
         } else if (name && ann.name === 'PathVariable') {
           params.push({ name, in: 'path', required: true, type });
         } else if (name && ann.name === 'RequestParam' && type !== 'Map' && type !== 'MultiValueMap') {
@@ -481,6 +485,7 @@ class JavaWalker {
       security: this.securityOf(annotations),
       params,
       bodyType,
+      bodyValidated,
       calls: this.calls(kid(node, 'methodBody'), cls),
     };
     cls.methods.push(method);
@@ -509,4 +514,75 @@ class JavaWalker {
     }
     return out;
   }
+}
+
+const REQUEST_BUILDERS: Record<string, HttpMethod> = { get: 'GET', post: 'POST', put: 'PUT', patch: 'PATCH', delete: 'DELETE', head: 'HEAD', options: 'OPTIONS' };
+const REST_TEMPLATE: Record<string, HttpMethod> = {
+  getForObject: 'GET',
+  getForEntity: 'GET',
+  postForObject: 'POST',
+  postForEntity: 'POST',
+  postForLocation: 'POST',
+  patchForObject: 'PATCH',
+  put: 'PUT',
+  delete: 'DELETE',
+};
+
+/**
+ * Test requests in Spring tests: MockMvc `perform(get("/x"))` (static import or
+ * `MockMvcRequestBuilders.get`), WebTestClient `.get().uri("/x")` and TestRestTemplate
+ * `getForEntity("/x", ...)`. Only URLs built from string literals, constants and `+` are kept.
+ */
+function findClientCalls(toks: IToken[], staticImports: Record<string, string>): ClientCallFact[] {
+  const out: ClientCallFact[] = [];
+  const name = (i: number): string | undefined => (toks[i]?.tokenType.name === 'Identifier' ? toks[i].image : undefined);
+  const is = (i: number, type: string): boolean => toks[i]?.tokenType.name === type;
+  for (let i = 0; i + 2 < toks.length; i++) {
+    const id = name(i);
+    if (!id || !is(i + 1, 'LBrace')) continue;
+    let method: HttpMethod | undefined;
+    let client: string | undefined;
+    const qualifier = is(i - 1, 'Dot') ? name(i - 2) : undefined;
+    if (REQUEST_BUILDERS[id] && (staticImports[id]?.startsWith('MockMvcRequestBuilders.') || '*MockMvcRequestBuilders' in staticImports || qualifier === 'MockMvcRequestBuilders')) {
+      method = REQUEST_BUILDERS[id];
+      client = 'MockMvc';
+    } else if (id === 'uri' && is(i - 1, 'Dot') && is(i - 2, 'RBrace') && is(i - 3, 'LBrace') && REQUEST_BUILDERS[name(i - 4) ?? '']) {
+      method = REQUEST_BUILDERS[name(i - 4)!];
+      client = 'WebTestClient';
+    } else if (REST_TEMPLATE[id] && is(i - 1, 'Dot') && /rest|template|client/i.test(qualifier ?? '')) {
+      method = REST_TEMPLATE[id];
+      client = 'TestRestTemplate';
+    }
+    if (!method || !client) continue;
+    // URL: tokens up to the first top-level comma or closing parenthesis.
+    const parts: PathPart[] = [];
+    let j = i + 2;
+    let ok = false;
+    const start = toks[j];
+    let end = toks[j];
+    for (; j < toks.length; j++) {
+      const tok = toks[j];
+      const type = tok.tokenType.name;
+      if (type === 'Comma' || type === 'RBrace') {
+        ok = parts.length > 0;
+        break;
+      }
+      end = tok;
+      if (type === 'StringLiteral') parts.push({ lit: unescapeJavaString(tok.image) });
+      else if (/Literal$/.test(type)) parts.push({ lit: tok.image.replace(/[lL]$/, '') });
+      else if (type === 'Identifier' || type === 'Dot') {
+        if (type === 'Identifier') parts.push({ dynamic: tok.image });
+      } else if (type !== 'Plus') break;
+    }
+    if (!ok || !start || !end) continue;
+    out.push({
+      client,
+      method,
+      url: compactExpr({ parts }),
+      pos: tokenPos(toks[i]),
+      start: tokenPos(start),
+      end: { line: end.endLine ?? end.startLine ?? 1, column: (end.endColumn ?? end.startColumn ?? 1) + 1 },
+    });
+  }
+  return out;
 }

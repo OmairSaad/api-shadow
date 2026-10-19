@@ -21,6 +21,7 @@ import {
 import type {
   CallableFact,
   ClassFact,
+  ClientCallFact,
   ExpressRouteFact,
   HandlerFact,
   JsFileFacts,
@@ -29,6 +30,7 @@ import type {
   NestParamFact,
   NestRouterModuleRoute,
   RefExpr,
+  RouterLib,
 } from './facts';
 import { own, table } from '../core/records';
 
@@ -57,14 +59,29 @@ const NEST_METHOD_DECORATORS = table<HttpMethod>({
 
 const NEST_MIDDLEWARE_DECORATORS = new Set(['UseGuards', 'UseInterceptors', 'UsePipes', 'UseFilters']);
 const EXPRESS_TYPE_NAMES = new Set(['Router', 'Express', 'Application', 'IRouter']);
-const ROUTER_PARAM_NAME = /^(app|router|api|server|expressApp|routes|r)$/;
+/** Router-typed parameters from other libraries: Fastify plugins and Koa routers. */
+const ROUTER_TYPE_NAMES: Record<string, Set<string>> = {
+  express: EXPRESS_TYPE_NAMES,
+  fastify: new Set(['FastifyInstance', 'FastifyPluginAsync', 'FastifyPluginCallback']),
+  '@koa/router': new Set(['Router']),
+  'koa-router': new Set(['Router']),
+};
+const ROUTER_PARAM_NAME = /^(app|router|api|server|expressApp|routes|r|fastify|instance|koaRouter)$/;
+const CLIENT_LIBS: Record<string, string> = { axios: 'axios', ky: 'ky', superagent: 'superagent', supertest: 'supertest', got: 'got', ofetch: 'ofetch', 'node-fetch': 'fetch', 'cross-fetch': 'fetch', 'isomorphic-fetch': 'fetch' };
+/** Global or framework-provided fetch functions. */
+const FETCH_FUNCTIONS = new Set(['fetch', '$fetch', 'useFetch', 'ofetch', 'useLazyFetch']);
+/** Names of imported API client instances (`import { api } from './api'`); their base URL is not visible. */
+const CLIENT_NAME = /^(api|apiClient|http|httpClient|client|axiosInstance|instance|\$http|backend|request|requests|fetcher)$/i;
+const HTTP_VERBS: Record<string, HttpMethod> = { get: 'GET', post: 'POST', put: 'PUT', patch: 'PATCH', delete: 'DELETE', del: 'DELETE', head: 'HEAD', options: 'OPTIONS' };
+/** Arguments that look like request data rather than a route handler. */
+const DATA_ARG = /^(data|body|payload|params|config|options|opts|form|formData|values|input|dto|query|headers|item|user|.*(Data|Body|Payload|Dto|Params|Config|Options|Input|Request))$/;
 const NON_SERVICE_RECEIVERS = new Set(['req', 'res', 'next', 'request', 'response', 'console', 'JSON', 'Math', 'Promise', 'Object', 'Array', 'Date', 'Number', 'String']);
 const SERVICE_NAME = /(service|services|repository|repositories|repo|dao|usecase|useCase|provider|manager|gateway|client|store)$/i;
 const SERVICE_SOURCE = /(\/|^)(services?|repositor(y|ies)|daos?|use-?cases?|providers?)(\/|$)|[./-](service|repository|repo|dao)(\.[cm]?[jt]sx?)?$/i;
 
 /** Quick textual check used to decide whether a file is worth parsing. */
 export function isJsCandidate(source: string): boolean {
-  return /express|@nestjs\/|Router\s*\(|\.use\s*\(|\.listen\s*\(|\.(get|post|put|patch|delete|all)\s*\(\s*['"`/]/.test(source);
+  return /express|fastify|koa|@nestjs\/|Router\s*\(|\.use\s*\(|\.listen\s*\(|\.(get|post|put|patch|delete|all|del)\s*\(\s*['"`/]|\bfetch\s*\(|axios|HttpClient|supertest|\bky\b/.test(source);
 }
 
 type Binding =
@@ -125,6 +142,8 @@ class JsAnalyzer {
     nestModules: [],
     nestRouterModule: [],
     nestGlobalGuards: [],
+    nestGlobalPipes: [],
+    clientCalls: [],
     constants: {},
     issues: [],
   };
@@ -133,6 +152,17 @@ class JsAnalyzer {
   private readonly expressNames = new Set<string>();
   /** Local names bound to `Router` from express. */
   private readonly routerFactoryNames = new Set<string>();
+  /** Factories and constructors from other router libraries. */
+  private readonly fastifyNames = new Set<string>();
+  private readonly koaAppNames = new Set<string>();
+  private readonly koaRouterNames = new Set<string>();
+  private readonly fastifyPluginNames = new Set<string>();
+  /** local name -> HTTP client library (`axios`, `ky`, `supertest`, ...). */
+  private readonly clientLibs = new Map<string, string>();
+  /** Variables holding an axios instance, with its `baseURL` when known. */
+  private readonly clientInstances = new Map<string, { client: string; base?: PathExpr }>();
+  /** Inline plugin functions given to `register()`, whose first parameter is the instance. */
+  private readonly pluginFunctions = new Set<Node>();
   /** local name -> imported name for `@nestjs/common` (and `@nestjs/core`) bindings. */
   private readonly nestNames = new Map<string, string>();
   private readonly nestNamespaces = new Set<string>();
@@ -235,6 +265,13 @@ class JsAnalyzer {
       if (name === '*' || name === '*cjs' || name === 'default') this.nestNamespaces.add(local);
       else this.nestNames.set(local, name);
     }
+    const whole = name === 'default' || name === '*cjs' || name === '*';
+    if (source === 'fastify' && (whole || name === 'fastify' || name === 'Fastify')) this.fastifyNames.add(local);
+    if (source === 'koa' && (whole || name === 'Koa')) this.koaAppNames.add(local);
+    if ((source === '@koa/router' || source === 'koa-router') && (whole || name === 'Router')) this.koaRouterNames.add(local);
+    if (source === 'fastify-plugin' && (whole || name === 'fastifyPlugin')) this.fastifyPluginNames.add(local);
+    const client = CLIENT_LIBS[source];
+    if (client && (whole || name === 'fetch' || name === 'ofetch' || name === '$fetch' || name === 'request')) this.clientLibs.set(local, client);
   }
 
   private requireSource(node: Node): string | undefined {
@@ -292,7 +329,8 @@ class JsAnalyzer {
       case 'FunctionExpression':
       case 'ArrowFunctionExpression':
       case 'ObjectMethod':
-        this.visitFunction(node, scope, nameHint);
+        // Plugins given to `register()` were visited there, with their instance parameter.
+        if (!this.pluginFunctions.has(node)) this.visitFunction(node, scope, nameHint);
         return;
       case 'ClassDeclaration':
       case 'ClassExpression':
@@ -384,6 +422,20 @@ class JsAnalyzer {
         return;
       }
     }
+    // `const api = axios.create({ baseURL: '/api' })`
+    if (init.type === 'CallExpression' && unwrap(init.callee as Node).type === 'MemberExpression') {
+      const c = unwrap(init.callee as Node) as t.MemberExpression;
+      const objName = unwrap(c.object).type === 'Identifier' ? (unwrap(c.object) as t.Identifier).name : undefined;
+      const lib = objName ? this.clientLibs.get(objName) : undefined;
+      if (lib && (propName(c) === 'create' || propName(c) === 'extend')) {
+        const baseNode = this.objectProp(init.arguments[0] as Node | undefined, 'baseURL') ?? this.objectProp(init.arguments[0] as Node | undefined, 'prefixUrl');
+        const base = baseNode ? (this.constPath(baseNode, scope) ?? this.importRef(baseNode, scope) ?? { parts: [{ dynamic: memberText(baseNode) ?? shortLabel(baseNode) }] }) : undefined;
+        this.clientInstances.set(name, { client: lib, base });
+        scope.set(name, { kind: 'shadow' });
+        this.walk(init, scope);
+        return;
+      }
+    }
     const creation = this.routerCreation(init);
     if (creation) {
       const key = this.addRouter(name, creation, init, scope);
@@ -415,20 +467,41 @@ class JsAnalyzer {
   private addRouter(name: string, kind: 'app' | 'router', node: Node, scope: Scope): string {
     const base = scope === this.fileScope ? name : `${name}@${posOf(node).line}`;
     const key = this.facts.routers.some((r) => r.key === base) ? `${base}#${++this.routerSeq}` : base;
-    this.facts.routers.push({ key, kind, name, pos: posOf(node) });
+    const n = unwrap(node);
+    const lib = this.routerLib(n);
+    // Koa: `new Router({ prefix: '/api' })`
+    const prefixArg = lib === 'koa' && (n.type === 'NewExpression' || n.type === 'CallExpression') ? this.objectProp(n.arguments[0] as Node | undefined, 'prefix') : undefined;
+    const prefix = prefixArg ? (this.constPath(prefixArg, scope) ?? this.importRef(prefixArg, scope)) : undefined;
+    this.facts.routers.push({ key, kind, name, pos: posOf(node), lib, prefix });
     return key;
   }
 
-  /** Detects `express()`, `express.Router()`, `Router()`, `require('express')()` and `new Router()`. */
+  private routerLib(n: Node): RouterLib {
+    if (n.type !== 'CallExpression' && n.type !== 'NewExpression') return 'express';
+    const callee = unwrap(n.callee as Node);
+    if (callee.type === 'Identifier' && this.fastifyNames.has(callee.name)) return 'fastify';
+    if (callee.type === 'Identifier' && (this.koaAppNames.has(callee.name) || this.koaRouterNames.has(callee.name))) return 'koa';
+    const src = this.requireSource(callee);
+    if (src === 'fastify') return 'fastify';
+    if (src === 'koa' || src === '@koa/router' || src === 'koa-router') return 'koa';
+    return 'express';
+  }
+
+  /**
+   * Detects `express()`, `express.Router()`, `Router()`, `require('express')()`, Fastify
+   * `fastify()`, Koa `new Koa()` and `new Router()` from `@koa/router`.
+   */
   private routerCreation(node: Node): 'app' | 'router' | undefined {
     const n = unwrap(node);
     if (n.type !== 'CallExpression' && n.type !== 'NewExpression') return undefined;
     const callee = unwrap(n.callee as Node);
     if (callee.type === 'Identifier') {
-      if (this.expressNames.has(callee.name)) return 'app';
-      if (this.routerFactoryNames.has(callee.name)) return 'router';
+      if (this.expressNames.has(callee.name) || this.fastifyNames.has(callee.name) || this.koaAppNames.has(callee.name)) return 'app';
+      if (this.routerFactoryNames.has(callee.name) || this.koaRouterNames.has(callee.name)) return 'router';
     }
-    if (this.requireSource(callee) === 'express') return 'app';
+    const src = this.requireSource(callee);
+    if (src === 'express' || src === 'fastify' || src === 'koa') return 'app';
+    if (src === '@koa/router' || src === 'koa-router') return 'router';
     if (callee.type === 'MemberExpression' && propName(callee) === 'Router') {
       const obj = unwrap(callee.object);
       if (obj.type === 'Identifier' && this.expressNames.has(obj.name)) return 'router';
@@ -680,7 +753,12 @@ class JsAnalyzer {
       // `router.use(...)` and `router.get(path, ...)` return the router itself, so chains resolve to it.
       if (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression') {
         const prop = propName(callee);
-        if (prop === 'use' || (prop !== undefined && prop in EXPRESS_METHODS && n.arguments.length >= 2)) {
+        // Koa: `router.routes()` and `router.middleware()` mount the router itself.
+        if ((prop === 'routes' || prop === 'middleware') && n.arguments.length === 0) {
+          const base = this.refOf(callee.object, scope);
+          if (base?.k === 'node') return base;
+        }
+        if (prop === 'use' || prop === 'register' || (prop !== undefined && prop in EXPRESS_METHODS && n.arguments.length >= 2)) {
           const base = this.refOf(callee.object, scope);
           if (base?.k === 'node') return base;
         }
@@ -781,14 +859,23 @@ class JsAnalyzer {
 
   private visitCall(node: t.CallExpression | t.OptionalCallExpression, scope: Scope): void {
     const callee = unwrap(node.callee as Node);
+    if (this.handleClientCall(node, callee, scope)) {
+      for (const a of node.arguments) this.walk(a as Node, scope);
+      this.walk(callee, scope);
+      return;
+    }
     if (callee.type === 'MemberExpression' || callee.type === 'OptionalMemberExpression') {
       const prop = propName(callee);
       if (prop) {
+        if (prop === 'route' && this.handleRouteObject(node, callee, scope)) return;
+        if (prop === 'register' && this.handleRegister(node, callee, scope)) return;
+        if (prop === 'prefix') this.handleKoaPrefix(node, callee, scope);
         if (prop in EXPRESS_METHODS && this.handleRouteCall(node, callee, prop, scope)) return;
         if (prop === 'use' && this.handleUse(node, callee, scope)) return;
         if (this.usesNest && prop === 'setGlobalPrefix') this.handleGlobalPrefix(node, scope);
         if (this.usesNest && prop === 'enableVersioning') this.handleVersioning(node);
-        if (this.usesNest && prop === 'useGlobalGuards') this.handleGlobalGuards(node);
+        if (this.usesNest && prop === 'useGlobalGuards') this.handleGlobalGuards(node, 'useGlobalGuards');
+        if (this.usesNest && prop === 'useGlobalPipes') this.handleGlobalGuards(node, 'useGlobalPipes');
         if (prop === 'listen' && !this.facts.listenPort) this.handleListen(node, callee, scope);
         if (this.usesNest && (prop === 'register' || prop === 'forRoutes') && memberText(callee.object) === 'RouterModule') {
           this.handleRouterModule(node);
@@ -833,20 +920,27 @@ class JsAnalyzer {
     } else {
       target = this.routerTarget(object, scope);
       if (!target || args.length < 2) return false;
+      // Koa named routes: `router.get('user', '/users/:id', handler)`
+      const [a0, a1] = [unwrap(args[0]), unwrap(args[1])];
+      if (args.length >= 3 && a0.type === 'StringLiteral' && !a0.value.startsWith('/') && a1.type === 'StringLiteral' && a1.value.startsWith('/')) args = args.slice(1);
       paths = this.pathsOf(args[0], scope, true);
       if (!paths) return false;
       args = args.slice(1);
     }
     if (!target || !paths || args.length === 0) return false;
     const flat = args.flatMap((a) => (a.type === 'ArrayExpression' ? (a.elements.filter(Boolean) as Node[]) : [a]));
-    const handlerNode = flat[flat.length - 1];
-    const middleware = flat.slice(0, -1).map((m) => shortLabel(m));
+    // Fastify: `app.get(path, { preHandler, schema }, handler)`; options are not middleware.
+    const options = flat.filter((a) => unwrap(a).type === 'ObjectExpression');
+    const callables = flat.filter((a) => unwrap(a).type !== 'ObjectExpression');
+    const handlerNode = callables[callables.length - 1];
+    const middleware = [...options.flatMap((o) => this.hookNames(o)), ...callables.slice(0, -1).map((m) => shortLabel(m))];
     const route: ExpressRouteFact = {
       router: target,
       method,
       paths,
       middleware,
       handler: handlerNode ? this.handlerOf(handlerNode, scope) : undefined,
+      bodySchema: options.some((o) => this.hasBodySchema(o)) || undefined,
       pos: posOf(callee.property),
       order: this.order++,
     };
@@ -898,6 +992,8 @@ class JsAnalyzer {
         name: n.type === 'FunctionExpression' && n.id ? n.id.name : '(anonymous)',
         pos,
         serviceCalls: this.collectServiceCalls(n, scope),
+        arity: n.params.length,
+        validatesBody: validatesBody(n) || undefined,
       };
     }
     if (n.type === 'Identifier') {
@@ -977,7 +1073,7 @@ class JsAnalyzer {
       const p = param.type === 'TSParameterProperty' ? param.parameter : param;
       const id = p.type === 'AssignmentPattern' ? p.left : p;
       if (id.type !== 'Identifier') return;
-      if (key && this.isRouterParam(id, node)) {
+      if (key && ((index === 0 && this.pluginFunctions.has(node)) || this.isRouterParam(id, node))) {
         const nodeKey = `param:${key}:${index}`;
         this.facts.routers.push({ key: nodeKey, kind: 'param', name: id.name, pos: posOf(id) });
         fnScope.set(id.name, { kind: 'router', key: nodeKey });
@@ -996,6 +1092,8 @@ class JsAnalyzer {
         routerParams,
         returns: this.returnedRouter(node, fnScope),
         serviceCalls: this.collectServiceCalls(node, fnScope),
+        arity: node.params.length,
+        validatesBody: validatesBody(node) || undefined,
       };
       this.facts.callables[key] = callable;
     }
@@ -1009,7 +1107,7 @@ class JsAnalyzer {
         const tn = ty.typeName;
         if (tn.type === 'Identifier') {
           const imp = own(this.facts.imports, tn.name);
-          return EXPRESS_TYPE_NAMES.has(imp?.name ?? '') && imp?.source === 'express';
+          return !!imp && !!ROUTER_TYPE_NAMES[imp.source]?.has(imp.name === 'default' ? 'Router' : imp.name);
         }
         if (tn.type === 'TSQualifiedName' && tn.left.type === 'Identifier') {
           return this.expressNames.has(tn.left.name) && EXPRESS_TYPE_NAMES.has(tn.right.name);
@@ -1300,6 +1398,7 @@ class JsAnalyzer {
     if (!httpMethod) return;
     const params: NestParamFact[] = [];
     let bodyType: string | undefined;
+    let bodyPipes: string[] | undefined;
     for (const param of member.params) {
       const p = param.type === 'TSParameterProperty' ? param.parameter : param;
       const decs = (p as { decorators?: t.Decorator[] }).decorators ?? [];
@@ -1313,7 +1412,11 @@ class JsAnalyzer {
         if (d.name === 'Param' && keyArg) params.push({ name: keyArg, in: 'path', required: true, type });
         else if (d.name === 'Query' && keyArg) params.push({ name: keyArg, in: 'query', required: !optional, type });
         else if (d.name === 'Headers' && keyArg) params.push({ name: keyArg, in: 'header', required: !optional, type });
-        else if (d.name === 'Body') bodyType = keyArg ? bodyType ?? 'object' : type ?? 'object';
+        else if (d.name === 'Body') {
+          bodyType = keyArg ? bodyType ?? 'object' : type ?? 'object';
+          const pipes = d.args.filter((a) => unwrap(a).type !== 'StringLiteral').map((a) => shortLabel(unwrap(a).type === 'NewExpression' ? ((unwrap(a) as t.NewExpression).callee as Node) : a));
+          if (pipes.length) bodyPipes = [...(bodyPipes ?? []), ...pipes];
+        }
       }
     }
     const callable = own(this.facts.callables, `${controller.className}.${methodName}`);
@@ -1327,6 +1430,7 @@ class JsAnalyzer {
       markers,
       params,
       bodyType,
+      bodyPipes,
       serviceCalls: callable?.serviceCalls ?? [],
     };
     controller.methods.push(method);
@@ -1357,26 +1461,215 @@ class JsAnalyzer {
     return label === '(expression)' ? undefined : `@${label}`;
   }
 
-  /** `{ provide: APP_GUARD, useClass: JwtAuthGuard }` entries in `@Module({ providers })`. */
+  /** `{ provide: APP_GUARD | APP_PIPE, useClass: X }` entries in `@Module({ providers })`. */
   private appGuards(providers: Node | undefined): void {
     if (!providers || unwrap(providers).type !== 'ArrayExpression') return;
     for (const el of (unwrap(providers) as t.ArrayExpression).elements) {
       if (!el || unwrap(el as Node).type !== 'ObjectExpression') continue;
       const provide = this.objectProp(el as Node, 'provide');
-      if (!provide || this.nestNames.get(memberText(provide) ?? '') !== 'APP_GUARD') continue;
+      const token = provide ? this.nestNames.get(memberText(provide) ?? '') : undefined;
+      if (token !== 'APP_GUARD' && token !== 'APP_PIPE') continue;
       const target = this.objectProp(el as Node, 'useClass') ?? this.objectProp(el as Node, 'useExisting');
       const name = target ? memberText(target) : undefined;
-      this.facts.nestGlobalGuards.push({ name: name ?? '(factory)', via: 'APP_GUARD', pos: posOf(el as Node) });
+      const list = token === 'APP_GUARD' ? this.facts.nestGlobalGuards : this.facts.nestGlobalPipes;
+      list.push({ name: name ?? '(factory)', via: token, pos: posOf(el as Node) });
     }
   }
 
-  private handleGlobalGuards(node: t.CallExpression | t.OptionalCallExpression): void {
+  private handleGlobalGuards(node: t.CallExpression | t.OptionalCallExpression, via: 'useGlobalGuards' | 'useGlobalPipes'): void {
     for (const arg of node.arguments) {
       if (arg.type === 'SpreadElement' || arg.type === 'ArgumentPlaceholder') continue;
       const a = unwrap(arg as Node);
       const name = a.type === 'NewExpression' ? memberText(a.callee as Node) : memberText(a);
-      this.facts.nestGlobalGuards.push({ name: name ?? shortLabel(a), via: 'useGlobalGuards', pos: posOf(node) });
+      (via === 'useGlobalGuards' ? this.facts.nestGlobalGuards : this.facts.nestGlobalPipes).push({ name: name ?? shortLabel(a), via, pos: posOf(node) });
     }
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // Fastify and Koa
+  // -------------------------------------------------------------------------------------------
+
+  /** Fastify `app.route({ method, url, handler, preHandler, schema })`. */
+  private handleRouteObject(node: t.CallExpression | t.OptionalCallExpression, callee: t.MemberExpression | t.OptionalMemberExpression, scope: Scope): boolean {
+    const opts = node.arguments[0] as Node | undefined;
+    if (!opts || unwrap(opts).type !== 'ObjectExpression' || node.arguments.length !== 1) return false;
+    const target = this.routerTarget(callee.object, scope);
+    const urlNode = this.objectProp(opts, 'url') ?? this.objectProp(opts, 'path');
+    const methodNode = this.objectProp(opts, 'method');
+    if (!target || !urlNode || !methodNode) return false;
+    const paths = this.pathsOf(urlNode, scope, true);
+    const methods = this.stringList(methodNode).map((m) => EXPRESS_METHODS[m.toLowerCase()]).filter((m): m is HttpMethod => !!m);
+    if (!paths || methods.length === 0) return false;
+    const handlerNode = this.objectProp(opts, 'handler');
+    for (const method of methods) {
+      this.facts.routes.push({
+        router: target,
+        method,
+        paths,
+        middleware: this.hookNames(opts),
+        handler: handlerNode ? this.handlerOf(handlerNode, scope) : undefined,
+        bodySchema: this.hasBodySchema(opts),
+        pos: posOf(callee.property),
+        order: this.order++,
+      });
+    }
+    this.walk(opts, scope);
+    return true;
+  }
+
+  /** Fastify route-level hooks, shown like middleware. */
+  private hookNames(opts: Node): string[] {
+    const out: string[] = [];
+    for (const hook of ['onRequest', 'preParsing', 'preValidation', 'preHandler']) {
+      const v = this.objectProp(opts, hook);
+      if (!v) continue;
+      const u = unwrap(v);
+      const items = u.type === 'ArrayExpression' ? (u.elements.filter(Boolean) as Node[]) : [u];
+      out.push(...items.map((i) => shortLabel(i)));
+    }
+    return out;
+  }
+
+  private hasBodySchema(opts: Node): boolean {
+    const schema = this.objectProp(opts, 'schema');
+    if (!schema) return false;
+    const u = unwrap(schema);
+    // `schema: { body: ... }`, or a schema object defined elsewhere (assume it may have a body).
+    return u.type === 'ObjectExpression' ? !!this.objectProp(u, 'body') : true;
+  }
+
+  /** Fastify `app.register(plugin, { prefix: '/v1' })`: the plugin's first parameter is a child router. */
+  private handleRegister(node: t.CallExpression | t.OptionalCallExpression, callee: t.MemberExpression | t.OptionalMemberExpression, scope: Scope): boolean {
+    const parent = this.routerTarget(callee.object, scope);
+    const first = node.arguments[0] as Node | undefined;
+    if (!parent || !first || first.type === 'SpreadElement') return false;
+    let plugin = unwrap(first);
+    // `fp(plugin)` from fastify-plugin, and `import('./routes')`.
+    if (plugin.type === 'CallExpression' && unwrap(plugin.callee as Node).type === 'Identifier' && this.fastifyPluginNames.has((unwrap(plugin.callee as Node) as t.Identifier).name) && plugin.arguments[0]) {
+      plugin = unwrap(plugin.arguments[0] as Node);
+    }
+    if (plugin.type === 'CallExpression' && plugin.callee.type === 'Import' && plugin.arguments[0]?.type === 'StringLiteral') {
+      plugin = { type: 'CallExpression', callee: { type: 'Identifier', name: 'require' }, arguments: [plugin.arguments[0]] } as unknown as Node;
+    }
+    const prefixNode = this.objectProp(node.arguments[1] as Node | undefined, 'prefix');
+    const prefix = prefixNode ? (this.constPath(prefixNode, scope) ?? this.importRef(prefixNode, scope)) : undefined;
+    let ref: RefExpr | undefined;
+    if (isFunctionLike(plugin)) {
+      const key = `(plugin@${posOf(plugin).line}:${posOf(plugin).column})`;
+      this.pluginFunctions.add(plugin);
+      this.visitFunction(plugin as t.Function, scope, key, key);
+      ref = { k: 'fn', key };
+    } else {
+      ref = this.refOf(plugin, scope);
+    }
+    if (!ref || (ref.k !== 'fn' && ref.k !== 'import' && ref.k !== 'call')) return false;
+    this.facts.injections.push({ callee: ref.k === 'call' ? ref.callee : ref, argIndex: 0, parent, pos: posOf(callee.property), paths: [prefix ?? { parts: [{ lit: '' }] }] });
+    for (const a of node.arguments.slice(1)) this.walk(a as Node, scope);
+    return true;
+  }
+
+  /** Koa `router.prefix('/v1')` on a router created in this file. */
+  private handleKoaPrefix(node: t.CallExpression | t.OptionalCallExpression, callee: t.MemberExpression | t.OptionalMemberExpression, scope: Scope): void {
+    const ref = this.refOf(callee.object, scope);
+    const arg = node.arguments[0] as Node | undefined;
+    if (ref?.k !== 'node' || !arg) return;
+    const router = this.facts.routers.find((r) => r.key === ref.key);
+    const prefix = this.constPath(arg, scope) ?? this.importRef(arg, scope);
+    if (router && router.lib === 'koa' && prefix) router.prefix = prefix;
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // HTTP clients: fetch, axios, ky, Angular HttpClient, supertest
+  // -------------------------------------------------------------------------------------------
+
+  private handleClientCall(node: t.CallExpression | t.OptionalCallExpression, callee: Node, scope: Scope): boolean {
+    const args = node.arguments.filter((a): a is t.Expression => a.type !== 'SpreadElement' && a.type !== 'ArgumentPlaceholder') as Node[];
+    // `fetch(url, { method })`, `axios(url | config)`, `ky(url)`, `$fetch(url)`
+    if (callee.type === 'Identifier' && args[0]) {
+      const name = callee.name;
+      const lib = this.clientLibs.get(name);
+      const isFetch = FETCH_FUNCTIONS.has(name) && (!scope.get(name) || lib === 'fetch');
+      if (!isFetch && (!lib || lib === 'supertest')) return false;
+      const client = isFetch ? (lib ?? name) : lib!;
+      const first = unwrap(args[0]);
+      if (first.type === 'ObjectExpression') {
+        const url = this.objectProp(first, 'url');
+        return url ? this.recordClientCall(client, this.methodFrom(this.objectProp(first, 'method')), url, node, scope, false) : false;
+      }
+      return this.recordClientCall(client, this.methodFrom(this.objectProp(args[1], 'method')) ?? (this.objectProp(args[1], 'method') ? undefined : 'GET'), args[0], node, scope, false);
+    }
+    if (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression') return false;
+    const prop = propName(callee);
+    const verb = prop ? HTTP_VERBS[prop.toLowerCase()] : undefined;
+    if (!prop || (!verb && prop !== 'request') || !args[0]) return false;
+    const recv = unwrap(callee.object);
+    // supertest: `request(app).get('/x')`, `request(app.getHttpServer()).post('/x')`
+    if (recv.type === 'CallExpression' && unwrap(recv.callee as Node).type === 'Identifier' && this.clientLibs.get((unwrap(recv.callee as Node) as t.Identifier).name) === 'supertest') {
+      return verb ? this.recordClientCall('supertest', verb, args[0], node, scope, false) : false;
+    }
+    const client = this.clientReceiver(recv, scope, args);
+    if (!client) return false;
+    if (prop === 'request') {
+      const cfg = args[0];
+      const url = this.objectProp(cfg, 'url');
+      return url ? this.recordClientCall(client.client, this.methodFrom(this.objectProp(cfg, 'method')), url, node, scope, client.unknownBase, client.base) : false;
+    }
+    return this.recordClientCall(client.client, verb, args[0], node, scope, client.unknownBase, client.base);
+  }
+
+  /** Identifies `axios`, `ky`, axios instances, `this.http` (Angular HttpClient) and imported API clients. */
+  private clientReceiver(recv: Node, scope: Scope, args: Node[]): { client: string; unknownBase: boolean; base?: PathExpr } | undefined {
+    if (recv.type === 'Identifier') {
+      const lib = this.clientLibs.get(recv.name);
+      if (lib && lib !== 'supertest') return { client: lib, unknownBase: false };
+      const instance = this.clientInstances.get(recv.name);
+      if (instance) return { client: instance.client, unknownBase: false, base: instance.base };
+      // An imported client instance: only when the call can't be a route registration.
+      const imp = own(this.facts.imports, recv.name);
+      if (imp && !scope.get(recv.name) && imp.source.startsWith('.') && CLIENT_NAME.test(recv.name) && !args.slice(1).some((a) => this.looksLikeHandler(a))) {
+        return { client: recv.name, unknownBase: true };
+      }
+      return undefined;
+    }
+    if (recv.type === 'MemberExpression' && unwrap(recv.object).type === 'ThisExpression') {
+      const prop = propName(recv);
+      const type = prop ? own(this.currentClass()?.deps, prop) : undefined;
+      if (type === 'HttpClient') return { client: 'HttpClient', unknownBase: false };
+    }
+    return undefined;
+  }
+
+  private looksLikeHandler(n: Node): boolean {
+    const u = unwrap(n);
+    if (isFunctionLike(u)) return true;
+    if (u.type === 'Identifier') return !DATA_ARG.test(u.name);
+    return u.type === 'MemberExpression' && !/(data|body|payload|params|config|options)$/i.test(propName(u) ?? '');
+  }
+
+  private methodFrom(node: Node | undefined): HttpMethod | undefined {
+    if (!node) return undefined;
+    const u = unwrap(node);
+    const text = u.type === 'StringLiteral' ? u.value : undefined;
+    return text ? HTTP_VERBS[text.toLowerCase()] : undefined;
+  }
+
+  private recordClientCall(client: string, method: HttpMethod | undefined, urlNode: Node, call: Node, scope: Scope, unknownBase: boolean, base?: PathExpr): boolean {
+    const u = unwrap(urlNode);
+    if (isFunctionLike(u) || u.type === 'ObjectExpression') return false;
+    const url = this.constPath(u, scope) ?? this.importRef(u, scope) ?? { parts: [{ dynamic: memberText(u) ?? shortLabel(u) }] };
+    const full = base ? compactExpr({ parts: [...base.parts, ...url.parts] }) : url;
+    const end = u.loc?.end;
+    const fact: ClientCallFact = {
+      client,
+      method,
+      url: full,
+      unknownBase: unknownBase || undefined,
+      pos: posOf(call),
+      start: posOf(u),
+      end: { line: end?.line ?? posOf(u).line, column: (end?.column ?? 0) + 1 },
+    };
+    this.facts.clientCalls.push(fact);
+    return true;
   }
 
   /** `app.listen(port)` on an Express app, a Nest app, or an app imported from another module. */
@@ -1396,6 +1689,11 @@ class JsAnalyzer {
     if (n.type === 'NumericLiteral') value = n.value;
     else if (n.type === 'StringLiteral' && /^\d+$/.test(n.value)) value = Number(n.value);
     else if (n.type === 'LogicalExpression' && (n.operator === '||' || n.operator === '??')) value = this.portValue(n.right) ?? this.portValue(n.left);
+    // Fastify: `app.listen({ port: 3000 })`
+    else if (n.type === 'ObjectExpression') {
+      const port = this.objectProp(n, 'port');
+      value = port ? this.portValue(port) : undefined;
+    }
     else if (n.type === 'CallExpression' && n.callee.type === 'Identifier' && ['Number', 'parseInt'].includes(n.callee.name) && n.arguments[0]) {
       value = this.portValue(n.arguments[0] as Node);
     } else if (n.type === 'Identifier') value = this.portConsts.get(n.name);
@@ -1504,4 +1802,26 @@ function bindingToRef(binding: Binding): RefExpr | undefined {
     default:
       return undefined;
   }
+}
+
+/** Request properties that carry the body: `req.body`, `request.body`, `ctx.request.body`. */
+const BODY_ACCESS = /(^|\.)(body|payload)$/;
+const SCHEMA_CHECK = /(valid|parse|assert|schema|check|decode|cast)/i;
+
+/** True when the function passes the request body to something that looks like a schema check. */
+function validatesBody(fn: t.Function): boolean {
+  let found = false;
+  const visit = (n: Node): void => {
+    if (found) return;
+    if (n.type === 'CallExpression' || n.type === 'OptionalCallExpression') {
+      const calleeText = memberText(n.callee as Node) ?? '';
+      if (SCHEMA_CHECK.test(calleeText) && n.arguments.some((a) => BODY_ACCESS.test(memberText(a as Node) ?? ''))) {
+        found = true;
+        return;
+      }
+    }
+    forEachChild(n, visit);
+  };
+  visit(fn.body);
+  return found;
 }

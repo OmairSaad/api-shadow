@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.0
+
+- **Unreachable routes**: routes that can never run because an earlier route on the same router matches every request they would get (`GET /users/:id` before `GET /users/me`, a catch-all before API routes). Covers Express, Koa and NestJS, across mounted routers, with regex constraints. Shown in the sidebar, the CodeLens and the Problems panel, with a link to the route that catches the requests.
+- **Frontend ↔ backend linking**: HTTP calls in frontend and test code (`fetch`, axios and axios instances, ky, `$fetch`, Angular `HttpClient`, supertest, Spring MockMvc, WebTestClient, TestRestTemplate) are matched to endpoints. Ctrl+click a URL to open the handler; hover for details; a CodeLens above each call names its endpoint.
+- **Calls to missing routes** are reported in the Issues view and the Problems panel, with a hint when only the HTTP method is wrong.
+- **Callers and test coverage** per endpoint, in the sidebar, the CodeLens and tooltips; **Show Callers** peeks them all. Optionally list endpoints nothing calls (`apiShadow.clientCalls.reportUncalled`).
+- **API diff**: **Compare API with Branch or Tag…** analyzes any git revision without checking it out and reports added, removed and changed endpoints, flagging breaking changes and removed auth.
+- **Request flow** diagram: callers, mounts, middleware, auth, validation, handler and services, each clickable.
+- **Request body validation**: validation middleware, handler schema checks, NestJS pipes, `@Valid` and Fastify schemas are recognised; unvalidated bodies are reported in projects that validate others.
+- **Fastify** support: routes, `route({...})`, plugins with prefixes (including `fastify-plugin` and inline plugins), hooks, body schemas, `listen({ port })`.
+- **Koa** support: `@koa/router` and `koa-router`, prefixes, nested routers, named routes, `del`.
+- **Ctrl+T**: endpoints appear in Go to Symbol in Workspace.
+- Test files are read for coverage; their routes are still not shown as endpoints unless `apiShadow.includeTestFiles` is on.
+- The Issues view opens bug sections (unreachable, missing routes, duplicates, parse errors) and keeps review lists collapsed.
+
 ## 0.2.0
 
 - **CodeLens** above every route declaration: full method and path, auth, duplicate warnings, and request actions.

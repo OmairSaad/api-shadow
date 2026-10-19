@@ -4,7 +4,10 @@ import { GROUP_BY_VALUES, type GroupBy } from './core/view';
 import { AnalysisController } from './vscode/analysisController';
 import { EndpointCodeLensProvider } from './vscode/codeLens';
 import { registerCommands } from './vscode/commands';
-import { DuplicateDiagnostics } from './vscode/diagnostics';
+import { ClientCallLinks } from './vscode/clientLinks';
+import { ApiDiagnostics } from './vscode/diagnostics';
+import { FlowView } from './vscode/flowView';
+import { EndpointSymbols } from './vscode/symbols';
 import { EndpointTreeProvider, type EndpointTreeNode } from './vscode/endpointTree';
 import { IssuesTreeProvider } from './vscode/issuesTree';
 import { ChannelLogger } from './vscode/logger';
@@ -30,7 +33,10 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
   const groupBy: GroupBy = storedGroup && (GROUP_BY_VALUES as string[]).includes(storedGroup) ? (storedGroup as GroupBy) : controller.settings.groupBy;
   const tree = new EndpointTreeProvider(groupBy);
   const issues = new IssuesTreeProvider();
-  const diagnostics = new DuplicateDiagnostics();
+  const diagnostics = new ApiDiagnostics();
+  const clientLinks = new ClientCallLinks();
+  const flow = new FlowView();
+  const sourceFiles: vscode.DocumentSelector = { scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java}' };
   const codeLens = new EndpointCodeLensProvider(() => controller.settings.codeLens);
 
   const endpointsView = vscode.window.createTreeView('apiShadow.endpoints', { treeDataProvider: tree, showCollapseAll: true });
@@ -65,11 +71,13 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
       status.tooltip = 'API Shadow: analyzing workspace…';
     } else {
       const n = result?.endpoints.length ?? 0;
+      const count = (kind: string): number => result?.issues.filter((i) => i.kind === kind).length ?? 0;
       const dups = result?.duplicates.length ?? 0;
-      const noAuth = result?.issues.filter((i) => i.kind === 'no-auth').length ?? 0;
-      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${dups ? ` $(warning) ${dups}` : ''}${noAuth ? ` $(unlock) ${noAuth}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
+      const noAuth = count('no-auth');
+      const problems = dups + count('unreachable') + count('broken-call') + count('no-validation');
+      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${problems ? ` $(warning) ${problems}` : ''}${noAuth ? ` $(unlock) ${noAuth}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
       status.tooltip = result
-        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s), ${noAuth} endpoint(s) without detected auth. Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached).`
+        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s), ${count('unreachable')} unreachable route(s), ${count('broken-call')} call(s) to missing routes, ${count('no-validation')} unvalidated request bod(ies), ${noAuth} endpoint(s) without detected auth. ${result.clientCalls.length} client and test call(s) found. Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached).`
         : 'API Shadow';
     }
     status.accessibilityInformation = { label: status.tooltip as string };
@@ -82,7 +90,11 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     issues,
     diagnostics,
     codeLens,
-    vscode.languages.registerCodeLensProvider({ scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java}' }, codeLens),
+    flow,
+    vscode.languages.registerCodeLensProvider(sourceFiles, codeLens),
+    vscode.languages.registerDefinitionProvider(sourceFiles, clientLinks),
+    vscode.languages.registerHoverProvider(sourceFiles, clientLinks),
+    vscode.languages.registerWorkspaceSymbolProvider(new EndpointSymbols(() => tree.allEndpoints())),
     endpointsView,
     issuesView,
     status,
@@ -90,14 +102,15 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
       tree.setResult(result);
       issues.setResult(result);
       codeLens.setResult(result);
-      diagnostics.update(result, controller.settings.duplicateDiagnostics);
+      clientLinks.setResult(result);
+      diagnostics.update(result, { duplicates: controller.settings.duplicateDiagnostics, unreachable: controller.settings.unreachableDiagnostics, brokenCalls: controller.settings.brokenCallDiagnostics });
       updateViewState();
       updateStatus();
     }),
     controller.onDidChangeAnalyzing(() => updateStatus()),
   );
 
-  registerCommands({ context, controller, tree, logger, onViewStateChanged: updateViewState });
+  registerCommands({ context, controller, tree, logger, flow, onViewStateChanged: updateViewState });
   void vscode.commands.executeCommand('setContext', 'apiShadow.filtered', false);
   updateStatus();
 

@@ -162,8 +162,14 @@ test('issues view lists duplicates, parse errors and limitations', async () => {
   const header = page.getByRole('button', { name: /^Issues - \d+ Section/ });
   if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
   const issues = page.locator('.pane').filter({ has: page.locator('.pane-header', { hasText: /Issues/ }) });
-  await expect(issues.getByRole('treeitem', { name: /Potential duplicate routes, \d+/ })).toBeVisible();
-  await expect(issues.getByRole('treeitem', { name: /Parse errors, \d+/ })).toBeVisible();
+  await expect(issues.getByRole('treeitem', { name: /Unreachable routes, 1/ })).toBeVisible();
+  await expect(issues.getByRole('treeitem', { name: /warning: GET \/users\/me is unreachable/ })).toBeVisible();
+  await page.locator('.pane-header', { hasText: 'Issues' }).hover();
+  await issues.getByRole('button', { name: 'Collapse All' }).click();
+  for (const section of [/Unreachable routes, 1/, /Calls to missing routes, 1/, /Potential duplicate routes, \d+/, /Endpoints without detected auth, \d+/, /Parse errors, \d+/]) {
+    await expect(issues.getByRole('treeitem', { name: section })).toBeVisible();
+  }
+  await issues.getByRole('treeitem', { name: /Potential duplicate routes, \d+/ }).locator('.monaco-tl-twistie').click();
   const dup = issues.getByRole('treeitem', { name: /warning: Potential duplicate route GET \/users\/\{\}/ });
   await expect(dup).toBeVisible();
   await dup.click();
@@ -216,6 +222,22 @@ test('CodeLens shows auth above the handler and Try it opens a request beside th
   await runCommand(page, 'Notifications: Clear All Notifications');
   await expect(page.locator('.editor-group-container')).toHaveCount(1);
   await clearFilter();
+});
+
+test('Ctrl+click on a frontend URL opens the backend handler', async () => {
+  await page.keyboard.press('Control+P');
+  await page.locator('.quick-input-widget input.input').fill('web-app/src/api/client.ts');
+  await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'client.ts' }).first().click();
+  const editor = page.locator('.editor-group-container.active');
+  await expect(editor.locator('.tab.active')).toContainText('client.ts');
+  // The CodeLens above the call names the endpoint it reaches.
+  await expect(editor.locator('.codelens-decoration').filter({ hasText: 'POST /api/v1/users · UsersController.create' })).toBeVisible();
+  const url = editor.locator('.view-line span', { hasText: "'/api/v1/users'" }).first();
+  await url.hover();
+  await expect(page.locator('.monaco-hover').filter({ hasText: 'UsersController.create' }).first()).toBeVisible();
+  await screenshot('11-client-hover');
+  await url.click({ modifiers: ['Control'] });
+  await expect(page.locator('.editor-group-container.active .tab.active')).toContainText('users.controller.ts');
 });
 
 test('updates the sidebar when a route file changes on disk', async () => {

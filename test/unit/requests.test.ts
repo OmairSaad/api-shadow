@@ -137,6 +137,7 @@ describe('Auth in filters and exports', () => {
         issues: [{ kind: 'no-auth', severity: 'warning', message: 'No auth found for POST /orders', location: open.location, endpointIds: [open.id] }],
         duplicates: [],
         servers: [],
+        clientCalls: [],
         stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false },
       },
       { title: 't', relativePath: (f) => f },

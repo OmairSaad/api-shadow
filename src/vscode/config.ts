@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { AUTH_WARNING_VALUES, DEFAULT_AUTH_PATTERNS, DEFAULT_PUBLIC_PATTERNS, type AuthOptions, type AuthWarnings } from '../core/auth';
 import type { GroupBy } from '../core/view';
 import { GROUP_BY_VALUES } from '../core/view';
-import type { Framework } from '../core/types';
+import { FRAMEWORKS, type Framework } from '../core/types';
 
 export interface ApiShadowConfig {
   frameworks: Set<Framework>;
@@ -22,9 +22,16 @@ export interface ApiShadowConfig {
   auth: AuthOptions;
   codeLens: boolean;
   requestsBaseUrl: string;
+  testCoverage: boolean;
+  clientCalls: boolean;
+  reportUncalled: boolean;
+  validation: boolean;
+  unreachable: boolean;
+  unreachableDiagnostics: boolean;
+  brokenCallDiagnostics: boolean;
 }
 
-const ALL_FRAMEWORKS: Framework[] = ['express', 'nestjs', 'spring'];
+const ALL_FRAMEWORKS: Framework[] = [...FRAMEWORKS];
 
 export function readConfig(): ApiShadowConfig {
   const c = vscode.workspace.getConfiguration('apiShadow');
@@ -54,6 +61,13 @@ export function readConfig(): ApiShadowConfig {
     },
     codeLens: c.get<boolean>('codeLens.enabled', true),
     requestsBaseUrl: c.get<string>('requests.baseUrl', ''),
+    testCoverage: c.get<boolean>('tests.enabled', true),
+    clientCalls: c.get<boolean>('clientCalls.enabled', true),
+    reportUncalled: c.get<boolean>('clientCalls.reportUncalled', false),
+    validation: c.get<boolean>('validation.enabled', true),
+    unreachable: c.get<boolean>('unreachable.enabled', true),
+    unreachableDiagnostics: c.get<boolean>('diagnostics.unreachable', true),
+    brokenCallDiagnostics: c.get<boolean>('diagnostics.brokenCalls', true),
   };
 }
 

@@ -1,11 +1,16 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { diffApis, diffToMarkdown } from '../core/apiDiff';
+import { AnalysisEngine } from '../core/engine';
+import { defaultExcludeGlobs, PathExcluder } from '../core/exclude';
+import { GitFileHost, gitRefs, gitRepoRoot } from '../core/gitHost';
 import { HTTP_METHODS, type AnalysisResult, type Endpoint, type HttpMethod, type SourceLocation } from '../core/types';
 import { GROUP_BY_VALUES, type GroupBy } from '../core/view';
 import { toMarkdown } from '../export/markdown';
 import { toOpenApi } from '../export/openapi';
 import { baseUrlFor, toCurl, toHttpFile } from '../export/requests';
 import type { AnalysisController } from './analysisController';
+import type { FlowView } from './flowView';
 import { relativePath, type EndpointTreeNode, type EndpointTreeProvider } from './endpointTree';
 import type { ChannelLogger } from './logger';
 
@@ -28,6 +33,7 @@ export interface CommandDeps {
   controller: AnalysisController;
   tree: EndpointTreeProvider;
   logger: ChannelLogger;
+  flow: FlowView;
   onViewStateChanged: () => void;
 }
 
@@ -110,6 +116,8 @@ export function registerCommands(deps: CommandDeps): void {
     if (!e) return;
     const actions: (vscode.QuickPickItem & { run: () => unknown })[] = [
       { label: '$(play) Try It', description: 'open a ready-to-send .http request', run: () => vscode.commands.executeCommand('apiShadow.openRequest', e) },
+      { label: '$(type-hierarchy) Show Request Flow', description: 'callers → middleware → handler → services', run: () => vscode.commands.executeCommand('apiShadow.showFlow', e) },
+      { label: '$(references) Show Callers', description: e.usage ? `${e.usage.calls} in code, ${e.usage.tests} in tests` : undefined, run: () => vscode.commands.executeCommand('apiShadow.showCallers', e) },
       { label: '$(copy) Copy as cURL', run: () => vscode.commands.executeCommand('apiShadow.copyCurl', e) },
       { label: '$(clippy) Copy Path', description: e.path, run: () => vscode.env.clipboard.writeText(e.path) },
       { label: '$(clippy) Copy Method and Path', run: () => vscode.env.clipboard.writeText(`${e.method} ${e.path}`) },
@@ -195,6 +203,68 @@ export function registerCommands(deps: CommandDeps): void {
     logger.info(`Exported Markdown to ${uri.fsPath}`);
     await announceExport(uri, target === undefined);
     return uri;
+  });
+
+  reg('apiShadow.showFlow', async (target?: EndpointTreeNode | Endpoint) => {
+    const e = endpointOf(target) ?? (await pickEndpoint(tree.allEndpoints(), 'Show Request Flow'));
+    const result = controller.current;
+    if (e && result) deps.flow.show(e, result);
+  });
+
+  // Peeks the frontend code and tests that call an endpoint, like Find All References.
+  reg('apiShadow.showCallers', async (target?: EndpointTreeNode | Endpoint) => {
+    const e = endpointOf(target) ?? (await pickEndpoint(tree.allEndpoints(), 'Show Callers'));
+    const result = controller.current;
+    if (!e || !result) return;
+    const callers = result.clientCalls.filter((c) => c.endpointIds.includes(e.id));
+    if (callers.length === 0) {
+      void vscode.window.showInformationMessage(`API Shadow: nothing in the workspace calls ${e.method} ${e.path}.`);
+      return;
+    }
+    const at = (l: SourceLocation): vscode.Position => new vscode.Position(Math.max(0, l.line - 1), Math.max(0, l.column - 1));
+    const locations = callers.map((c) => new vscode.Location(vscode.Uri.file(c.location.file), new vscode.Range(at(c.range.start), at(c.range.end))));
+    await vscode.commands.executeCommand('editor.action.peekLocations', vscode.Uri.file(e.location.file), at(e.location), locations, 'peek');
+    return callers;
+  });
+
+  reg('apiShadow.compareWithRef', async (ref?: string) => {
+    if (!vscode.workspace.isTrusted) {
+      void vscode.window.showWarningMessage('API Shadow: comparing with a git revision runs git, so it is only available in trusted workspaces.');
+      return;
+    }
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    const repo = folder ? await gitRepoRoot(folder.uri.fsPath) : undefined;
+    if (!repo) {
+      void vscode.window.showInformationMessage('API Shadow: the workspace is not in a git repository.');
+      return;
+    }
+    let target = typeof ref === 'string' ? ref : undefined;
+    if (!target) {
+      const refs = await gitRefs(repo);
+      const pick = await vscode.window.showQuickPick(
+        [
+          ...refs.map((r) => ({ label: r.name, description: r.kind, iconPath: new vscode.ThemeIcon(r.kind === 'tag' ? 'tag' : r.kind === 'remote' ? 'cloud' : 'git-branch') })),
+          { label: 'HEAD', description: 'last commit (shows uncommitted changes)', iconPath: new vscode.ThemeIcon('git-commit') },
+        ],
+        { title: 'Compare API With…', placeHolder: 'Choose a branch, tag or commit to compare the working tree against' },
+      );
+      if (!pick) return;
+      target = pick.label;
+    }
+    const head = controller.current ?? (await controller.refresh(false), controller.current);
+    if (!head) return;
+    const settings = controller.settings;
+    const excluder = new PathExcluder(defaultExcludeGlobs(settings.includeTestFiles ? 'include' : 'read', settings.exclude));
+    const base = await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `API Shadow: analyzing ${target}…` }, async () => {
+      const host = await GitFileHost.create(repo, target!, excluder, (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath));
+      return new AnalysisEngine(host, controller.engineOptionsSnapshot(), logger).analyze();
+    });
+    const diff = diffApis(base, head);
+    const md = diffToMarkdown(diff, target, 'working tree', relativePath);
+    const doc = await vscode.workspace.openTextDocument({ language: 'markdown', content: md });
+    await vscode.commands.executeCommand('markdown.showPreview', doc.uri);
+    logger.info(`Compared API with ${target}: ${diff.added.length} added, ${diff.removed.length} removed, ${diff.changed.length} changed, ${diff.breaking} breaking.`);
+    return diff;
   });
 
   reg('apiShadow.exportHttp', async (target?: vscode.Uri) => {

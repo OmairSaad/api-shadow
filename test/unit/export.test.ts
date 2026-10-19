@@ -13,6 +13,7 @@ async function all(): Promise<{ result: AnalysisResult; rel: (f: string) => stri
     issues: parts.flatMap((p) => p.result.issues),
     duplicates: parts.flatMap((p) => p.result.duplicates),
     servers: parts.flatMap((p) => p.result.servers),
+    clientCalls: parts.flatMap((p) => p.result.clientCalls),
     stats: parts[0].result.stats,
   };
   const fixtures = path.dirname(parts[0].root);

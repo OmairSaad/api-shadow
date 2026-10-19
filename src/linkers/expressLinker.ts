@@ -7,7 +7,7 @@
  * (apps and routers that are never mounted) and accumulating prefixes and middleware.
  */
 import * as path from 'path';
-import type { CallableFact, ExpressRouteFact, HandlerFact, JsFileFacts, Pos, RefExpr, RouterNodeFact } from '../analyzers/facts';
+import type { CallableFact, ExpressRouteFact, HandlerFact, JsFileFacts, Pos, RefExpr, RouterLib, RouterNodeFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
 import type { Endpoint, PathExpr, ServiceCall, ServiceRef, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
@@ -36,8 +36,10 @@ interface Edge {
   file: string;
   pos: Pos;
   order: number;
-  via: 'use' | 'call';
+  via: 'use' | 'call' | 'register';
 }
+
+type Chain = { scope: string; order: number }[];
 
 const MAX_DEPTH = 24;
 
@@ -72,7 +74,7 @@ export class ExpressLinker {
         const child = this.nodes.get(nodeId(callee.file, `param:${callee.key}:${inj.argIndex}`));
         const parentNode = this.nodes.get(parent.id);
         if (!child || !parentNode) continue;
-        parentNode.edges.push({ child: child.id, paths: [{ parts: [{ lit: '/' }] }], middleware: [], file, pos: inj.pos, order: Number.MAX_SAFE_INTEGER, via: 'call' });
+        parentNode.edges.push({ child: child.id, paths: inj.paths ?? [{ parts: [{ lit: '/' }] }], middleware: [], file, pos: inj.pos, order: Number.MAX_SAFE_INTEGER, via: inj.paths ? 'register' : 'call' });
         child.incoming++;
       }
     }
@@ -91,7 +93,7 @@ export class ExpressLinker {
           node.fact.pos,
         );
       }
-      this.walk(node, [], [], [], new Set([node.id]), orphan, 0);
+      this.walk(node, [], [], [], new Set([node.id]), orphan, 0, node.fact.lib ?? 'express', []);
     }
     return this.endpoints;
   }
@@ -235,11 +237,15 @@ export class ExpressLinker {
   // Expansion
   // -----------------------------------------------------------------------------------------
 
-  private walk(node: GraphNode, prefixes: PathExpr[], middleware: string[], chain: string[], stack: Set<string>, orphan: boolean, depth: number): void {
+  private walk(node: GraphNode, inherited: PathExpr[], middleware: string[], chain: string[], stack: Set<string>, orphan: boolean, depth: number, parentLib: RouterLib, registered: Chain): void {
     if (depth > MAX_DEPTH) return;
+    // Plugin and router parameters take the library of whatever they are attached to.
+    const lib = node.fact.kind === 'param' ? parentLib : (node.fact.lib ?? parentLib);
+    const prefixes = node.fact.prefix ? [...inherited, node.fact.prefix] : inherited;
     for (const { file, route } of node.routes) {
       const routeMiddleware = [...middleware, ...this.usesBefore(node, file, route.order, route.paths), ...route.middleware];
-      for (const p of route.paths) this.emit(file, route, [...prefixes, p], routeMiddleware, chain, orphan);
+      const at: Chain = [...registered, { scope: `${node.id}|${file}`, order: route.order }];
+      for (const p of route.paths) this.emit(file, route, [...prefixes, p], routeMiddleware, chain, orphan, lib, at);
     }
     for (const edge of node.edges) {
       const child = this.nodes.get(edge.child);
@@ -250,12 +256,15 @@ export class ExpressLinker {
       }
       const mw = [...middleware, ...this.usesBefore(node, edge.file, edge.order, edge.paths), ...edge.middleware];
       const nextStack = new Set(stack).add(child.id);
+      const at: Chain = [...registered, { scope: `${node.id}|${edge.file}`, order: edge.order }];
       for (const p of edge.paths) {
         const note =
           edge.via === 'use'
             ? `Mounted at "${exprToDisplay(p)}" (${shortFile(edge.file)}:${edge.pos.line})`
-            : `Registered via function call (${shortFile(edge.file)}:${edge.pos.line})`;
-        this.walk(child, [...prefixes, p], mw, [...chain, note], nextStack, orphan, depth + 1);
+            : edge.via === 'register'
+              ? `Registered as a plugin${joinUrlPaths(exprToDisplay(p)) === '/' ? '' : ` with prefix "${exprToDisplay(p)}"`} (${shortFile(edge.file)}:${edge.pos.line})`
+              : `Registered via function call (${shortFile(edge.file)}:${edge.pos.line})`;
+        this.walk(child, [...prefixes, p], mw, [...chain, note], nextStack, orphan, depth + 1, lib, at);
       }
     }
   }
@@ -276,7 +285,7 @@ export class ExpressLinker {
     return out;
   }
 
-  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: string[], orphan: boolean): void {
+  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: string[], orphan: boolean, lib: RouterLib, registered: Chain): void {
     const isStatic = exprs.every(isStaticExpr);
     const hasRegex = exprs.some((e) => e.parts.some((p) => 'regex' in p));
     // Regex routes cannot be joined like strings: show the prefix followed by the pattern.
@@ -292,9 +301,10 @@ export class ExpressLinker {
     const handler = route.handler;
     const resolved = handler ? this.resolveHandler(file, handler) : undefined;
     const services = this.services(resolved?.file ?? file, [...(handler?.serviceCalls ?? []), ...(resolved?.callable?.serviceCalls ?? [])]);
+    const validated = route.bodySchema ? 'route schema' : handler?.validatesBody || resolved?.callable?.validatesBody ? 'schema check in handler' : undefined;
     const endpoint: Endpoint = {
       id: '',
-      framework: 'express',
+      framework: lib,
       method: route.method,
       path: fullPath,
       pathIsStatic: isStatic,
@@ -305,6 +315,7 @@ export class ExpressLinker {
       middleware: dedupe(middleware),
       services,
       parameters: [],
+      validation: validated ? { status: 'validated', via: [validated] } : undefined,
       notes,
       projectRoot: this.ctx.projectRootOf(file),
     };
@@ -312,6 +323,9 @@ export class ExpressLinker {
     if (this.seen.has(endpoint.id)) return;
     this.seen.add(endpoint.id);
     this.endpoints.push(endpoint);
+    // Express passes `next` third, Koa second; a handler that takes it may let requests through.
+    const arity = handler?.arity ?? resolved?.callable?.arity ?? 0;
+    this.ctx.registrations.set(endpoint.id, { chain: registered, passThrough: arity >= (lib === 'koa' ? 2 : 3) });
   }
 
   private resolveHandler(file: string, handler: HandlerFact): { file: string; callable?: CallableFact; location?: SourceLocation } | undefined {

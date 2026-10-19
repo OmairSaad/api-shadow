@@ -1,13 +1,13 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { describeAuth } from '../core/auth';
-import type { AnalysisResult, Endpoint, HttpMethod, SourceLocation } from '../core/types';
+import type { AnalysisIssue, AnalysisResult, Endpoint, HttpMethod, SourceLocation } from '../core/types';
 import { EMPTY_FILTER, groupEndpoints, isFilterActive, matchesFilter, type EndpointFilter, type GroupBy } from '../core/view';
 
 export type EndpointTreeNode =
   | { type: 'group'; key: string; label: string; description?: string; endpoints: Endpoint[] }
   | { type: 'endpoint'; endpoint: Endpoint; duplicate: boolean; noAuth: boolean }
-  | { type: 'detail'; id: string; label: string; description?: string; icon: string; color?: string; tooltip?: string; location?: SourceLocation };
+  | { type: 'detail'; id: string; label: string; description?: string; icon: string; color?: string; tooltip?: string; location?: SourceLocation; command?: vscode.Command };
 
 const METHOD_COLORS: Record<HttpMethod, string> = {
   GET: 'charts.green',
@@ -20,7 +20,7 @@ const METHOD_COLORS: Record<HttpMethod, string> = {
   ALL: 'charts.orange',
 };
 
-const FRAMEWORK_LABEL: Record<string, string> = { express: 'Express', nestjs: 'NestJS', spring: 'Spring' };
+export const FRAMEWORK_LABEL: Record<string, string> = { express: 'Express', fastify: 'Fastify', koa: 'Koa', nestjs: 'NestJS', spring: 'Spring' };
 
 export function relativePath(file: string): string {
   return vscode.workspace.asRelativePath(file, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
@@ -32,6 +32,9 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
   private result: AnalysisResult | undefined;
   private duplicateIds = new Set<string>();
   private noAuthIds = new Set<string>();
+  /** Unreachable endpoint id -> the issue (which names the route that catches its requests). */
+  private unreachable = new Map<string, AnalysisIssue>();
+  private hasCalls = false;
   private filterState: EndpointFilter = EMPTY_FILTER;
   private groupMode: GroupBy;
 
@@ -51,6 +54,8 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     this.result = result;
     this.duplicateIds = new Set(result.duplicates.flatMap((d) => d.endpointIds));
     this.noAuthIds = new Set(result.issues.filter((i) => i.kind === 'no-auth').flatMap((i) => i.endpointIds ?? []));
+    this.unreachable = new Map(result.issues.filter((i) => i.kind === 'unreachable').map((i) => [i.endpointIds![0], i]));
+    this.hasCalls = result.clientCalls.length > 0;
     this.emitter.fire(undefined);
   }
 
@@ -106,6 +111,20 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     if (duplicate) {
       out.push({ type: 'detail', id: `${e.id}:dup`, label: 'Potential duplicate route', icon: 'warning', tooltip: 'Another endpoint in this project matches the same method and path. See the Issues view.' });
     }
+    const unreachable = this.unreachable.get(e.id);
+    if (unreachable) {
+      const blocker = unreachable.related?.[0];
+      out.push({
+        type: 'detail',
+        id: `${e.id}:unreachable`,
+        label: `Unreachable: ${blocker?.message ?? 'an earlier route catches these requests'}`,
+        description: blocker ? `${path.basename(blocker.location.file)}:${blocker.location.line}` : undefined,
+        icon: 'error',
+        color: 'list.errorForeground',
+        tooltip: unreachable.message,
+        location: blocker?.location,
+      });
+    }
     if (e.auth) {
       const label = `Auth: ${describeAuth(e.auth)}`;
       out.push({
@@ -140,6 +159,26 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
         label: `Middleware: ${e.middleware.join(', ')}`,
         icon: 'shield',
         tooltip: e.middleware.join('\n'),
+      });
+    }
+    if (e.validation) {
+      const ok = e.validation.status === 'validated';
+      out.push({
+        type: 'detail',
+        id: `${e.id}:validation`,
+        label: ok ? `Body validated: ${e.validation.via.join(', ')}` : `Body not validated${e.validation.via.length ? ` (${e.validation.via.join(', ')})` : ''}`,
+        icon: ok ? 'pass' : 'circle-slash',
+      });
+    }
+    if (e.usage && (this.hasCalls || e.usage.calls + e.usage.tests > 0)) {
+      const n = e.usage.calls + e.usage.tests;
+      out.push({
+        type: 'detail',
+        id: `${e.id}:usage`,
+        label: `Callers: ${e.usage.calls} in code · ${e.usage.tests} in tests`,
+        icon: n > 0 ? 'references' : 'circle-slash',
+        tooltip: n > 0 ? 'Show the code and tests that call this endpoint' : 'Nothing in the workspace calls this endpoint',
+        command: n > 0 ? { command: 'apiShadow.showCallers', title: 'Show Callers', arguments: [e] } : undefined,
       });
     }
     e.services.forEach((s, i) => {
@@ -188,7 +227,8 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
         item.tooltip = node.tooltip ?? node.label;
         item.contextValue = 'apiShadow.detail';
         item.accessibilityInformation = { label: node.description ? `${node.label}, ${node.description}` : node.label };
-        if (node.location) {
+        if (node.command) item.command = node.command;
+        else if (node.location) {
           item.command = { command: 'apiShadow.openLocation', title: 'Open', arguments: [node.location, true] };
         }
         return item;
@@ -198,19 +238,22 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
 
   private endpointItem(e: Endpoint, duplicate: boolean, noAuth: boolean): vscode.TreeItem {
     const label = `${e.method} ${e.path}`;
-    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length > 0 || !!e.handlerLocation || !!e.requestBodyType || !!e.auth || duplicate;
+    const unreachable = this.unreachable.has(e.id);
+    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length > 0 || !!e.handlerLocation || !!e.requestBodyType || !!e.auth || !!e.usage || duplicate;
     const item = new vscode.TreeItem({ label, highlights: [[0, e.method.length]] }, hasDetails ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     item.id = `endpoint:${e.id}`;
     const where = `${path.basename(e.location.file)}:${e.location.line}`;
-    item.description = [e.handler, where, duplicate ? 'duplicate' : undefined, noAuth ? 'no auth' : undefined, e.pathIsStatic ? undefined : 'dynamic'].filter(Boolean).join(' · ');
-    item.iconPath = duplicate
+    item.description = [e.handler, where, unreachable ? 'unreachable' : undefined, duplicate ? 'duplicate' : undefined, noAuth ? 'no auth' : undefined, e.pathIsStatic ? undefined : 'dynamic'].filter(Boolean).join(' · ');
+    item.iconPath = unreachable
+      ? new vscode.ThemeIcon('error', new vscode.ThemeColor('list.errorForeground'))
+      : duplicate
       ? new vscode.ThemeIcon('warning', new vscode.ThemeColor('list.warningForeground'))
       : new vscode.ThemeIcon('circle-filled', new vscode.ThemeColor(METHOD_COLORS[e.method]));
     item.contextValue = 'apiShadow.endpoint';
     item.command = { command: 'apiShadow.openLocation', title: 'Go to Endpoint', arguments: [e.location, true] };
     item.tooltip = this.tooltip(e, duplicate, noAuth);
     item.accessibilityInformation = {
-      label: `${e.method} ${e.path}, ${FRAMEWORK_LABEL[e.framework]}${e.handler ? `, handler ${e.handler}` : ''}, ${where}${duplicate ? ', potential duplicate' : ''}${noAuth ? ', no auth found' : ''}`,
+      label: `${e.method} ${e.path}, ${FRAMEWORK_LABEL[e.framework]}${e.handler ? `, handler ${e.handler}` : ''}, ${where}${unreachable ? ', unreachable' : ''}${duplicate ? ', potential duplicate' : ''}${noAuth ? ', no auth found' : ''}`,
       role: 'treeitem',
     };
     return item;
@@ -233,6 +276,9 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     if (e.auth) row('Auth', describeAuth(e.auth) ?? '');
     if (duplicate) row('Warning', 'potential duplicate route');
     if (noAuth) row('Warning', 'no auth found, but other endpoints in this project have it');
+    if (this.unreachable.has(e.id)) row('Error', 'unreachable: an earlier route catches every request');
+    if (e.validation) row('Body', e.validation.status === 'validated' ? `validated (${e.validation.via.join(', ')})` : 'not validated');
+    if (e.usage) row('Callers', `${e.usage.calls} in code, ${e.usage.tests} in tests`);
     for (const n of e.notes) md.appendMarkdown('- ').appendText(n).appendMarkdown('\n');
     return md;
   }

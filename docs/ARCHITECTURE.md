@@ -8,10 +8,11 @@ This document is for contributors. It explains how endpoints are discovered and 
 src/
   core/        Host-agnostic engine, data model, path utilities, filtering/grouping, duplicates, excludes
   analyzers/   Per-file fact extraction (Babel AST for JS/TS, java-parser CST for Java, Spring config)
-  linkers/     Cross-file resolution: Express router graph, NestJS prefixes/modules, Spring mappings/constants
+  linkers/     Cross-file resolution: Express/Fastify/Koa router graph, NestJS prefixes/modules, Spring mappings/constants, imported JS path constants
   export/      Markdown, OpenAPI 3.0, cURL and .http writers
   vscode/      VS Code integration: file host, controller (watching, debouncing, cancellation, cache),
-               tree views, CodeLens, commands, diagnostics, config, logging
+               tree views, CodeLens, go to definition and hovers on client calls, workspace symbols,
+               request flow webview, commands, diagnostics, config, logging
   extension.ts Activation; wires the above together and returns a small public API
 ```
 
@@ -32,6 +33,20 @@ FileHost.listFiles ──► kind + exclusion ──► per-file facts (cached) 
 3. **Linking**: linkers read facts only. When a linker needs a file the pre-filter skipped (an imported controller, a service, a `ApiPaths.java` constants class), it calls `LinkContext.getFacts`/`requestJavaClass`. The engine parses the requested files and links again (bounded to 4 rounds).
    Before linkers see a JS file's facts, `LinkContext.getFacts` resolves path parts that reference imported constants (`ref` parts recorded by the analyzer for imported names in path positions) against the exporting file's `constants`, following re-exports (`linkers/jsConstants.ts`). `app.use(IMPORTED, x)` records `maybePath`: it becomes the mount path only if it resolves to a string, and stays middleware otherwise. Unresolved references become `dynamic` parts.
 4. **Post-processing**: duplicate detection (`core/duplicates.ts`), auth classification (`core/auth.ts`), listening ports per project (`servers`), issue de-duplication, sorting.
+
+## Unreachable routes
+
+Linkers record where each endpoint was registered (`LinkContext.registrations`): a chain of `{ scope, order }` from the root app down, where `scope` is a router node in one file and `order` the position of the route or mount within it. `core/shadowing.ts` compares two endpoints only where their chains share a scope, so "registered first" is always well defined, and uses `core/routeMatch.ts` to test whether the earlier pattern accepts every request of the later one (`shadows`). Handlers whose arity includes `next` (3 for Express, 2 for Koa) are pass-through and never shadow. NestJS records method order per controller. Spring and Fastify are excluded: they choose the most specific route.
+
+## Client calls
+
+The JS analyzer records `ClientCallFact`s for `fetch`/`$fetch`/`useFetch`, axios (default import, `axios.create` instances with their `baseURL`), ky, superagent, got, Angular `HttpClient` (`this.http` typed `HttpClient`), supertest (`request(app).get(...)`) and imported client instances named like `api`/`http`/`client`. Imported instances only count when the arguments can't be a route registration (`looksLikeHandler`). Client detection runs before route detection in `visitCall`. The Java analyzer scans tokens for MockMvc request builders, WebTestClient `.get().uri(...)` and TestRestTemplate calls.
+
+`core/clientCalls.ts` parses each URL (`parseClientUrl`: origin, query and hash dropped; `${...}` segments unknown; a leading unknown part or an imported instance means an unknown prefix, matched as a suffix) and scores it against every endpoint (`matchScore`), keeping the best matches. A call with no match is reported only if its first fixed segment appears in some route, so calls to other services are ignored. Test files are listed by the host in `read` mode and excluded from the linkers' fact map in the engine; their calls count as tests.
+
+## API diff
+
+`core/gitHost.ts` is a `FileHost` over a commit: `ls-tree -r -l -z` lists blobs and sizes, and one `cat-file --batch` process reads them. A second `AnalysisEngine` analyzes the revision with the current settings, and `core/apiDiff.ts` pairs endpoints by framework, method, normalised path, version and conditions. Only run in trusted workspaces.
 
 ## Auth detection
 
@@ -100,9 +115,9 @@ Indexes classes by simple name and FQN, and constants by `Class.NAME` (plus ever
 - Commands accept optional arguments (`filter('text')`, `filterByMethod(['GET'])`, `groupBy('method')`, `exportMarkdown(uri)`) so they can be scripted and tested without UI. Without arguments they open quick inputs and dialogs.
 - `activate` returns `ApiShadowApi` (`getResult`, `refresh`, `whenIdle`, `onDidChangeResult`, tree access), used by the integration tests.
 
-## Why no webview?
+## Native views first
 
-Everything the UI needs (hierarchy, icons, descriptions, tooltips, inline actions, filtering via quick input) is available in native TreeViews. These are keyboard- and screen-reader-accessible, theme-aware, and cheaper than a webview. A webview would only be justified for richer visualisations, such as a dependency graph.
+Everything the sidebar needs (hierarchy, icons, descriptions, tooltips, inline actions, filtering via quick input) is available in native TreeViews. These are keyboard- and screen-reader-accessible, theme-aware, and cheaper than a webview. The only webview is the request flow diagram (`vscode/flowView.ts`), a visualisation TreeViews can't express. It uses a strict CSP (no remote content, one nonce'd inline script), escapes every value, styles itself with theme variables, and makes clickable steps keyboard-focusable.
 
 ## Tests
 
