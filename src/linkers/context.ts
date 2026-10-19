@@ -1,6 +1,7 @@
 import * as path from 'path';
 import type { FileFacts, Pos } from '../analyzers/facts';
 import type { AnalysisIssue, Endpoint, SourceLocation } from '../core/types';
+import { resolveJsFacts } from './jsConstants';
 
 export interface LinkOptions {
   springApplyContextPath: boolean;
@@ -44,14 +45,28 @@ export class LinkContext {
     for (const f of this.filesNamed(`${name}.java`)) this.getFacts(f);
   }
 
+  private readonly resolved = new Map<string, FileFacts>();
+
+  /** Facts as linkers should see them: JS path references to imported constants are resolved. */
   getFacts(file: string): FileFacts | undefined {
+    const f = this.rawFacts(file);
+    if (f?.lang !== 'js') return f;
+    let r = this.resolved.get(file);
+    if (!r) {
+      r = resolveJsFacts(file, f, (other) => this.rawFacts(other), this.allFiles);
+      this.resolved.set(file, r);
+    }
+    return r;
+  }
+
+  private rawFacts(file: string): FileFacts | undefined {
     const f = this.facts.get(file);
     if (!f && this.allFiles.has(file)) this.requested.add(file);
     return f;
   }
 
-  files(): IterableIterator<[string, FileFacts]> {
-    return this.facts.entries();
+  *files(): IterableIterator<[string, FileFacts]> {
+    for (const file of this.facts.keys()) yield [file, this.getFacts(file)!];
   }
 
   issue(severity: AnalysisIssue['severity'], message: string, file?: string, pos?: Pos, kind: AnalysisIssue['kind'] = 'limitation'): void {

@@ -8,6 +8,7 @@ import type { JsFileFacts, NestGlobalGuardFact, NestGlobalPrefixFact, NestRouter
 import { exprToDisplay, isStaticExpr, joinUrlPaths, lit } from '../core/paths';
 import type { Endpoint, HttpMethod, PathExpr, ServiceRef, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
+import { own } from '../core/records';
 
 interface ProjectConfig {
   prefix?: { fact: NestGlobalPrefixFact; file: string };
@@ -115,7 +116,7 @@ export class NestLinker {
                 if (!isStatic) notes.push('Path contains expressions that could not be resolved statically.');
                 const location = loc(file, method.pos);
                 const callableKey = `${controller.className}.${method.name}`;
-                const callable = facts.callables[callableKey];
+                const callable = own(facts.callables, callableKey);
                 const endpoint: Endpoint = {
                   id: '',
                   framework: 'nestjs',
@@ -131,6 +132,7 @@ export class NestLinker {
                   services: this.services(file, facts, method.serviceCalls),
                   parameters: method.params.map(({ name, in: where, required, type }) => ({ name, in: where, required, type })),
                   requestBodyType: method.bodyType,
+                  version: versioning && versioning.type !== 'URI' && versions.length > 0 ? versions.join(', ') : undefined,
                   notes,
                   projectRoot: root,
                 };
@@ -168,27 +170,27 @@ export class NestLinker {
   }
 
   private findClassMethod(file: string, facts: JsFileFacts, className: string, method: string): SourceLocation | undefined {
-    const local = facts.classes[className];
+    const local = own(facts.classes, className);
     if (local) {
-      const key = local.methods[method];
-      const callable = key ? facts.callables[key] : undefined;
+      const key = own(local.methods, method);
+      const callable = key ? own(facts.callables, key) : undefined;
       return loc(file, callable?.pos ?? local.pos);
     }
-    const imp = facts.imports[className];
+    const imp = own(facts.imports, className);
     if (!imp) return undefined;
     const target = resolveModule(file, imp.source, this.ctx.allFiles);
     if (!target) return undefined;
     const tf = this.ctx.getFacts(target);
     if (tf?.lang !== 'js') return undefined;
     const name = imp.name === 'default' ? (Object.values(tf.exports).find((e) => e.k === 'class') as { name: string } | undefined)?.name ?? className : imp.name;
-    const cls = tf.classes[name];
+    const cls = own(tf.classes, name);
     if (cls) {
-      const key = cls.methods[method];
-      const callable = key ? tf.callables[key] : undefined;
+      const key = own(cls.methods, method);
+      const callable = key ? own(tf.callables, key) : undefined;
       return loc(target, callable?.pos ?? cls.pos);
     }
     // Re-exported through a barrel file.
-    const reexport = tf.exports[name];
+    const reexport = own(tf.exports, name);
     if (reexport?.k === 'import') {
       const next = resolveModule(target, reexport.source, this.ctx.allFiles);
       const nf = next ? this.ctx.getFacts(next) : undefined;
@@ -197,7 +199,7 @@ export class NestLinker {
     for (const star of tf.starExports) {
       const next = resolveModule(target, star, this.ctx.allFiles);
       const nf = next ? this.ctx.getFacts(next) : undefined;
-      if (next && nf?.lang === 'js' && nf.classes[name]) return this.findClassMethod(next, nf, name, method);
+      if (next && nf?.lang === 'js' && own(nf.classes, name)) return this.findClassMethod(next, nf, name, method);
     }
     return undefined;
   }

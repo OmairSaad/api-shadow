@@ -26,7 +26,7 @@ The status bar shows the endpoint count and any potential duplicate routes. Clic
 
 ### Every endpoint, with its real path
 
-API Shadow follows the code to work out the URL a request actually hits. That includes Express mount prefixes through nested routers across files, NestJS global prefixes, URI versioning and `RouterModule`, and Spring class and method mappings, constants and `server.servlet.context-path`. Paths that depend on runtime values are marked **dynamic** instead of guessed.
+API Shadow follows the code to work out the URL a request actually hits. That includes Express mount prefixes through nested routers across files, NestJS global prefixes, URI versioning and `RouterModule`, and Spring class and method mappings, constants and `server.servlet.context-path`. Path constants imported from other files (`router.get(ROUTES.USERS)`, `` `${API}/orders` ``, enums, `module.exports = { ... }`) are resolved too. Paths that depend on runtime values are marked **dynamic** instead of guessed.
 
 ![An Express endpoint expanded in the sidebar, showing its handler in the controller module, the middleware chain from the app and the mount, the service it calls, and a potential duplicate route warning.](media/express.png)
 
@@ -150,7 +150,7 @@ API Shadow reports what it can prove from the code. When something can't be reso
 - **Spring**: Kotlin controllers are **not supported** (they're reported in the Issues view). Profile-specific configuration (`application-<profile>.yml`), `${...}` placeholders, custom composed mapping annotations, functional routing (`RouterFunction`) and Spring Data REST repositories aren't analyzed.
 - **Other frameworks** (Fastify, Koa, Hapi, Micronaut, JAX-RS, …) aren't supported yet.
 - Unsaved editor changes are picked up when you save. Files over 512 KB and test files are skipped by default (both configurable).
-- Duplicate detection compares method and path with parameter names ignored, within one project. It doesn't consider hosts, headers or `consumes`/`produces` conditions.
+- Duplicate detection compares method and path with parameter names ignored, within one project. Routes that differ in Spring `params`/`headers`/`consumes`/`produces` conditions or in a NestJS header-selected version are not duplicates. Hosts and Express `router.route()` conditions aren't considered. Parts that can't be resolved statically never make two routes equal unless they are the same expression.
 - **Auth detection** matches names of middleware, guards, annotations and decorators (configurable with `apiShadow.auth.patterns`). It shows that an auth check is applied, not that it is correct. Checks inside handlers (`if (!req.user)`), per-path rules in a Spring Security filter chain, and NestJS `consumer.apply()` middleware aren't seen.
 
 ## Commands

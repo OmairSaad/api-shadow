@@ -11,6 +11,7 @@ import type { CallableFact, ExpressRouteFact, HandlerFact, JsFileFacts, Pos, Ref
 import { exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
 import type { Endpoint, PathExpr, ServiceCall, ServiceRef, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
+import { own } from '../core/records';
 
 type Resolved =
   | { t: 'router'; id: string }
@@ -148,18 +149,18 @@ export class ExpressLinker {
       case 'node':
         return { t: 'router', id: nodeId(file, ref.key) };
       case 'fn':
-        return facts.callables[ref.key] ? { t: 'fn', file, key: ref.key } : undefined;
+        return own(facts.callables, ref.key) ? { t: 'fn', file, key: ref.key } : undefined;
       case 'class':
-        return facts.classes[ref.name] ? { t: 'class', file, name: ref.name } : this.resolveImportedName(file, ref.name, depth, true);
+        return own(facts.classes, ref.name) ? { t: 'class', file, name: ref.name } : this.resolveImportedName(file, ref.name, depth, true);
       case 'instance': {
-        if (facts.classes[ref.className]) return { t: 'instance', file, className: ref.className };
+        if (own(facts.classes, ref.className)) return { t: 'instance', file, className: ref.className };
         const cls = this.resolveImportedName(file, ref.className, depth, false);
         return cls?.t === 'class' ? { t: 'instance', file: cls.file, className: cls.name } : undefined;
       }
       case 'call': {
         const callee = this.resolve(file, ref.callee, depth + 1);
         if (callee?.t !== 'fn') return undefined;
-        const callable = this.js(callee.file)?.callables[callee.key];
+        const callable = own(this.js(callee.file)?.callables, callee.key);
         return callable?.returns ? this.resolve(callee.file, callable.returns, depth + 1) : undefined;
       }
       case 'import': {
@@ -171,7 +172,7 @@ export class ExpressLinker {
   }
 
   private resolveImportedName(file: string, name: string, depth: number, asClass: boolean): Resolved | undefined {
-    const imp = this.js(file)?.imports[name];
+    const imp = own(this.js(file)?.imports, name);
     if (!imp) return undefined;
     const r = this.resolve(file, { k: 'import', source: imp.source, name: imp.name }, depth + 1);
     if (asClass || r?.t === 'class') return r;
@@ -190,7 +191,7 @@ export class ExpressLinker {
         return base ? this.memberOf(base, member) : undefined;
       }
       if (name === 'default') {
-        const objMember = facts.exports[`default.${member}`];
+        const objMember = own(facts.exports, `default.${member}`);
         if (objMember) return this.resolve(file, objMember, depth + 1);
         const base = this.lookupExport(file, 'default', depth) ?? this.lookupExport(file, '*cjs', depth);
         if (base) return this.memberOf(base, member);
@@ -208,7 +209,7 @@ export class ExpressLinker {
   private lookupExport(file: string, name: string, depth: number): Resolved | undefined {
     const facts = this.js(file);
     if (!facts) return undefined;
-    const ref = facts.exports[name];
+    const ref = own(facts.exports, name);
     if (ref) return this.resolve(file, ref, depth + 1);
     if (name !== 'default' && name !== '*cjs') {
       for (const star of facts.starExports) {
@@ -224,7 +225,7 @@ export class ExpressLinker {
   private memberOf(base: Resolved, member: string): Resolved | undefined {
     if (base.t === 'instance' || base.t === 'class') {
       const className = base.t === 'instance' ? base.className : base.name;
-      const key = this.js(base.file)?.classes[className]?.methods[member];
+      const key = own(own(this.js(base.file)?.classes, className)?.methods, member);
       return key ? { t: 'fn', file: base.file, key } : undefined;
     }
     return undefined;
@@ -321,7 +322,7 @@ export class ExpressLinker {
       r = this.resolve(file, { ...handler.ref, member: handler.member });
     }
     if (r?.t !== 'fn') return undefined;
-    const callable = this.js(r.file)?.callables[r.key];
+    const callable = own(this.js(r.file)?.callables, r.key);
     if (!callable) return undefined;
     return { file: r.file, callable, location: loc(r.file, callable.pos) };
   }
@@ -335,21 +336,21 @@ export class ExpressLinker {
       if (call.type) {
         const cls = this.resolve(file, { k: 'class', name: call.type });
         if (cls?.t === 'class') {
-          const key = this.js(cls.file)?.classes[cls.name]?.methods[call.method];
-          const callable = key ? this.js(cls.file)?.callables[key] : undefined;
-          location = callable ? loc(cls.file, callable.pos) : loc(cls.file, this.js(cls.file)?.classes[cls.name]?.pos);
+          const key = own(own(this.js(cls.file)?.classes, cls.name)?.methods, call.method);
+          const callable = key ? own(this.js(cls.file)?.callables, key) : undefined;
+          location = callable ? loc(cls.file, callable.pos) : loc(cls.file, own(this.js(cls.file)?.classes, cls.name)?.pos);
         }
       } else if (call.local) {
-        const imp = this.js(file)?.imports[call.local];
+        const imp = own(this.js(file)?.imports, call.local);
         const r = imp ? this.resolve(file, { k: 'import', source: imp.source, name: imp.name }) : undefined;
-        const callable = r?.t === 'fn' ? this.js(r.file)?.callables[r.key] : undefined;
+        const callable = r?.t === 'fn' ? own(this.js(r.file)?.callables, r.key) : undefined;
         if (r?.t === 'fn' && callable) location = loc(r.file, callable.pos);
       } else {
-        const imp = this.js(file)?.imports[call.receiver];
+        const imp = own(this.js(file)?.imports, call.receiver);
         if (imp) {
           const r = this.resolve(file, { k: 'import', source: imp.source, name: imp.name, member: call.method });
           if (r?.t === 'fn') {
-            const callable = this.js(r.file)?.callables[r.key];
+            const callable = own(this.js(r.file)?.callables, r.key);
             if (callable) location = loc(r.file, callable.pos);
           }
           owner = call.receiver;

@@ -6,17 +6,18 @@ import { parse, type CstNode, type IToken } from 'java-parser';
 import type { EndpointParameter, HttpMethod, PathExpr, PathPart, ServiceCall } from '../core/types';
 import { compactExpr } from '../core/paths';
 import type { JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, Pos } from './facts';
+import { own, table } from '../core/records';
 
 type CstElement = CstNode | IToken;
 
-const MAPPING_ANNOTATIONS: Record<string, HttpMethod | undefined> = {
+const MAPPING_ANNOTATIONS = table<HttpMethod | undefined>({
   GetMapping: 'GET',
   PostMapping: 'POST',
   PutMapping: 'PUT',
   PatchMapping: 'PATCH',
   DeleteMapping: 'DELETE',
   RequestMapping: undefined,
-};
+});
 
 const SECURITY_ANNOTATIONS = new Set(['PreAuthorize', 'PostAuthorize', 'Secured', 'RolesAllowed', 'PermitAll', 'DenyAll']);
 const CONTROLLER_ANNOTATIONS = new Set(['RestController', 'Controller']);
@@ -294,7 +295,14 @@ class JavaWalker {
           : [];
         if (methods.length === 0) methods = ['ALL'];
       }
-      return { methods, paths: this.pathsFrom(ann) };
+      // Attributes that narrow which requests match; two mappings differing in these don't clash.
+      const conditions = ['params', 'headers', 'consumes', 'produces']
+        .filter((key) => ann.values[key])
+        .map((key) => {
+          const text = this.text(ann.values[key]).replace(/\s+/g, ' ');
+          return `${key} = ${text.length > 80 ? text.slice(0, 79) + '…' : text}`;
+        });
+      return { methods, paths: this.pathsFrom(ann), conditions };
     }
     return undefined;
   }
@@ -492,7 +500,7 @@ class JavaWalker {
         const prev2 = toks[i - 2];
         if (!prev2 || prev2.tokenType.name !== 'This') continue;
       }
-      const type = cls.fields[a.image];
+      const type = own(cls.fields, a.image);
       if (!type) continue;
       const key = `${a.image}.${b.image}`;
       if (seen.has(key)) continue;

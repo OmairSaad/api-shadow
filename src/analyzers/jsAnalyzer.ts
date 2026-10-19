@@ -30,8 +30,9 @@ import type {
   NestRouterModuleRoute,
   RefExpr,
 } from './facts';
+import { own, table } from '../core/records';
 
-const EXPRESS_METHODS: Record<string, HttpMethod> = {
+const EXPRESS_METHODS = table<HttpMethod>({
   get: 'GET',
   post: 'POST',
   put: 'PUT',
@@ -41,9 +42,9 @@ const EXPRESS_METHODS: Record<string, HttpMethod> = {
   options: 'OPTIONS',
   head: 'HEAD',
   all: 'ALL',
-};
+});
 
-const NEST_METHOD_DECORATORS: Record<string, HttpMethod> = {
+const NEST_METHOD_DECORATORS = table<HttpMethod>({
   Get: 'GET',
   Post: 'POST',
   Put: 'PUT',
@@ -52,7 +53,7 @@ const NEST_METHOD_DECORATORS: Record<string, HttpMethod> = {
   Options: 'OPTIONS',
   Head: 'HEAD',
   All: 'ALL',
-};
+});
 
 const NEST_MIDDLEWARE_DECORATORS = new Set(['UseGuards', 'UseInterceptors', 'UsePipes', 'UseFilters']);
 const EXPRESS_TYPE_NAMES = new Set(['Router', 'Express', 'Application', 'IRouter']);
@@ -87,6 +88,14 @@ class Scope {
   hasOwn(name: string): boolean {
     return this.bindings.has(name);
   }
+  /** Constant bindings named `prefix.<rest>` visible from this scope, keyed by `<rest>`. */
+  constsUnder(prefix: string): Map<string, PathExpr> {
+    const out = this.parent?.constsUnder(prefix) ?? new Map<string, PathExpr>();
+    for (const [name, b] of this.bindings) {
+      if (b.kind === 'const' && name.startsWith(prefix + '.')) out.set(name.slice(prefix.length + 1), b.expr);
+    }
+    return out;
+  }
 }
 
 interface ClassContext {
@@ -116,6 +125,7 @@ class JsAnalyzer {
     nestModules: [],
     nestRouterModule: [],
     nestGlobalGuards: [],
+    constants: {},
     issues: [],
   };
   private readonly fileScope = new Scope();
@@ -152,8 +162,42 @@ class JsAnalyzer {
     for (const pending of this.pendingExports) {
       const ref = this.refOf(pending.node, pending.scope);
       if (ref) this.facts.exports[pending.name] = ref;
+      this.recordConstantExport(pending.name, pending.node, pending.scope);
     }
     return this.facts;
+  }
+
+  /** Records string constants reachable through an export, so other files' paths can use them. */
+  private recordConstantExport(exportName: string, node: Node, scope: Scope): void {
+    // `module.exports = ROUTES` is imported as a whole; its members are top-level keys.
+    const prefix = exportName === '*cjs' ? '' : exportName;
+    const key = (rest: string): string => (prefix ? `${prefix}.${rest}` : rest);
+    const n = unwrap(node);
+    const value = this.constPath(n, scope);
+    if (value && prefix) this.facts.constants[prefix] = value;
+    if (n.type === 'Identifier') {
+      for (const [rest, expr] of scope.constsUnder(n.name)) this.facts.constants[key(rest)] = expr;
+    } else if (n.type === 'ObjectExpression') {
+      for (const [rest, expr] of this.objectConstants(n, scope)) this.facts.constants[key(rest)] = expr;
+    }
+  }
+
+  /** String constants in an object literal, nested keys joined by dots: `{ A: { B: '/b' } }` → `A.B`. */
+  private objectConstants(node: Node, scope: Scope): Map<string, PathExpr> {
+    const out = new Map<string, PathExpr>();
+    let n = unwrap(node);
+    // `Object.freeze({ ... })`
+    if (n.type === 'CallExpression' && memberText(n.callee as Node) === 'Object.freeze' && n.arguments[0]) n = unwrap(n.arguments[0] as Node);
+    if (n.type !== 'ObjectExpression') return out;
+    for (const prop of n.properties) {
+      if (prop.type !== 'ObjectProperty') continue;
+      const key = keyName(prop.key);
+      if (!key) continue;
+      const value = this.constPath(prop.value as Node, scope);
+      if (value) out.set(key, value);
+      for (const [rest, expr] of this.objectConstants(prop.value as Node, scope)) out.set(`${key}.${rest}`, expr);
+    }
+    return out;
   }
 
   // -------------------------------------------------------------------------------------------
@@ -279,6 +323,14 @@ class JsAnalyzer {
       case 'BlockStatement':
         this.hoist(node.body, scope);
         break;
+      case 'TSEnumDeclaration':
+        // `enum Routes { USERS = '/users' }`: members are constants like object properties.
+        for (const member of node.members) {
+          const key = keyName(member.id as Node);
+          const value = member.initializer ? this.constPath(member.initializer as Node, scope) : undefined;
+          if (key && value) scope.set(`${node.id.name}.${key}`, { kind: 'const', expr: value });
+        }
+        return;
       default:
         break;
     }
@@ -348,16 +400,8 @@ class JsAnalyzer {
       scope.set(name, { kind: 'const', expr: pathExpr });
       return;
     }
-    if (init.type === 'ObjectExpression') {
-      // `const ROUTES = { USERS: '/users' }`
-      for (const prop of init.properties) {
-        if (prop.type === 'ObjectProperty') {
-          const key = keyName(prop.key);
-          const value = this.constPath(prop.value, scope);
-          if (key && value) scope.set(`${name}.${key}`, { kind: 'const', expr: value });
-        }
-      }
-    }
+    // `const ROUTES = { USERS: '/users', ADMIN: { STATS: '/admin/stats' } }`, optionally frozen.
+    for (const [key, value] of this.objectConstants(init, scope)) scope.set(`${name}.${key}`, { kind: 'const', expr: value });
     if (init.type === 'NewExpression' && init.callee.type === 'Identifier') {
       scope.set(name, { kind: 'instance', className: init.callee.name });
       this.walk(init, scope);
@@ -451,7 +495,7 @@ class JsAnalyzer {
       const prop = leftText.slice(5);
       const ctx = this.currentClass()!;
       if (right.type === 'NewExpression' && right.callee.type === 'Identifier') ctx.deps[prop] = right.callee.name;
-      else if (SERVICE_NAME.test(prop) && !ctx.deps[prop]) ctx.deps[prop] = '';
+      else if (SERVICE_NAME.test(prop) && !own(ctx.deps, prop)) ctx.deps[prop] = '';
     }
     forEachChild(node, (child) => this.walk(child, scope));
   }
@@ -525,6 +569,8 @@ class JsAnalyzer {
         this.facts.exports[decl.id.name] = { k: 'fn', key: decl.id.name };
       } else if (decl.type === 'ClassDeclaration' && decl.id) {
         this.facts.exports[decl.id.name] = { k: 'class', name: decl.id.name };
+      } else if (decl.type === 'TSEnumDeclaration') {
+        this.pendingExports.push({ name: decl.id.name, node: decl.id, scope });
       } else if (decl.type === 'VariableDeclaration') {
         for (const d of decl.declarations) {
           if (d.id.type === 'Identifier') this.pendingExports.push({ name: d.id.name, node: d.id, scope });
@@ -590,7 +636,7 @@ class JsAnalyzer {
     if (n.type === 'Identifier') {
       const binding = scope.get(n.name);
       if (binding) return bindingToRef(binding);
-      const imp = this.facts.imports[n.name];
+      const imp = own(this.facts.imports, n.name);
       if (imp) return { k: 'import', source: imp.source, name: imp.name };
       return undefined;
     }
@@ -613,7 +659,7 @@ class JsAnalyzer {
           return { ...binding.ref, member: prop };
         }
         if (binding) return undefined;
-        const imp = this.facts.imports[obj.name];
+        const imp = own(this.facts.imports, obj.name);
         if (imp) return { k: 'import', source: imp.source, name: imp.name, member: prop };
       }
       return undefined;
@@ -665,7 +711,7 @@ class JsAnalyzer {
       return out.length > 0 ? out : undefined;
     }
     if (n.type === 'RegExpLiteral') return [{ parts: [{ regex: `/${n.pattern}/${n.flags}` }] }];
-    const expr = this.constPath(n, scope);
+    const expr = this.constPath(n, scope) ?? this.importRef(n, scope);
     if (expr) return [expr];
     if (!allowDynamic) return undefined;
     if (isFunctionLike(n) || n.type === 'ObjectExpression') return undefined;
@@ -685,7 +731,7 @@ class JsAnalyzer {
           parts.push({ lit: q.value.cooked ?? q.value.raw });
           const e = n.expressions[i];
           if (e) {
-            const sub = this.constPath(e as Node, scope);
+            const sub = this.constPath(e as Node, scope) ?? this.importRef(e as Node, scope);
             if (sub) parts.push(...sub.parts);
             else parts.push({ dynamic: memberText(e as Node) ?? shortLabel(e as Node) });
           }
@@ -695,10 +741,11 @@ class JsAnalyzer {
       case 'BinaryExpression': {
         if (n.operator !== '+') return undefined;
         const left = this.constPath(n.left as Node, scope);
-        const right = this.constPath(n.right as Node, scope);
-        if (!left && !right) return undefined;
-        const l = left ?? { parts: [{ dynamic: memberText(n.left as Node) ?? shortLabel(n.left as Node) }] };
-        const r = right ?? { parts: [{ dynamic: memberText(n.right) ?? shortLabel(n.right) }] };
+        const right = this.constPath(n.right, scope);
+        // `API + ROUTES.USERS` with both imported is a path as well; the linker resolves it.
+        if (!left && !right && !(this.importRef(n.left as Node, scope) && this.importRef(n.right, scope))) return undefined;
+        const l = left ?? this.importRef(n.left as Node, scope) ?? { parts: [{ dynamic: memberText(n.left as Node) ?? shortLabel(n.left as Node) }] };
+        const r = right ?? this.importRef(n.right, scope) ?? { parts: [{ dynamic: memberText(n.right) ?? shortLabel(n.right) }] };
         return compactExpr({ parts: [...l.parts, ...r.parts] });
       }
       case 'Identifier': {
@@ -714,6 +761,18 @@ class JsAnalyzer {
       default:
         return undefined;
     }
+  }
+
+  /**
+   * A reference to an imported constant (`ROUTES.SHOPIFY` where `ROUTES` is imported), resolved
+   * across files by the linkers. Only used where a path is expected.
+   */
+  private importRef(node: Node, scope: Scope): PathExpr | undefined {
+    const text = memberText(node);
+    if (!text) return undefined;
+    const root = text.split('.')[0];
+    if (!own(this.facts.imports, root) || scope.get(root)) return undefined;
+    return { parts: [{ ref: text }] };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -862,7 +921,7 @@ class JsAnalyzer {
         }
       } else if (obj.type === 'MemberExpression' && unwrap(obj.object).type === 'ThisExpression') {
         const prop = propName(obj);
-        const type = prop ? this.currentClass()?.deps[prop] : undefined;
+        const type = prop ? own(this.currentClass()?.deps, prop) : undefined;
         if (type) ref = { k: 'instance', className: type };
       }
       return { name: text, controller, member, ref, pos, serviceCalls: [] };
@@ -888,9 +947,11 @@ class JsAnalyzer {
       paths = firstPaths;
       rest = args.slice(1);
     }
+    const maybePath = !firstPaths && args.length > 1 ? this.importRef(first, scope) : undefined;
     this.facts.mounts.push({
       parent: target,
       paths,
+      maybePath,
       args: rest.map((a) => ({ ref: this.refOf(a, scope), text: shortLabel(a) })),
       pos: posOf(callee.property),
       order: this.order++,
@@ -947,7 +1008,7 @@ class JsAnalyzer {
       if (ty.type === 'TSTypeReference') {
         const tn = ty.typeName;
         if (tn.type === 'Identifier') {
-          const imp = this.facts.imports[tn.name];
+          const imp = own(this.facts.imports, tn.name);
           return EXPRESS_TYPE_NAMES.has(imp?.name ?? '') && imp?.source === 'express';
         }
         if (tn.type === 'TSQualifiedName' && tn.left.type === 'Identifier') {
@@ -1006,7 +1067,7 @@ class JsAnalyzer {
         const callee = unwrap(n.callee as Node);
         // Direct call of a function imported from a service module: `getTags()` from './tag.service'.
         if (callee.type === 'Identifier' && !scope.get(callee.name)) {
-          const imp = this.facts.imports[callee.name];
+          const imp = own(this.facts.imports, callee.name);
           if (imp && imp.source.startsWith('.') && SERVICE_SOURCE.test(imp.source)) {
             const moduleName = imp.source.split('/').pop()!.replace(/\.[cm]?[jt]sx?$/, '');
             const id = `${moduleName}.${callee.name}`;
@@ -1023,7 +1084,7 @@ class JsAnalyzer {
             let call: ServiceCall | undefined;
             if (recv.type === 'Identifier' && !NON_SERVICE_RECEIVERS.has(recv.name)) {
               const binding = scope.get(recv.name);
-              const imp = this.facts.imports[recv.name];
+              const imp = own(this.facts.imports, recv.name);
               if (binding?.kind === 'instance' && (SERVICE_NAME.test(binding.className) || SERVICE_NAME.test(recv.name))) {
                 call = { receiver: recv.name, method, type: binding.className };
               } else if (!binding && imp && imp.source.startsWith('.') && (SERVICE_NAME.test(recv.name) || SERVICE_SOURCE.test(imp.source))) {
@@ -1032,7 +1093,7 @@ class JsAnalyzer {
             } else if (recv.type === 'MemberExpression' && unwrap(recv.object).type === 'ThisExpression') {
               const prop = propName(recv);
               if (prop && ctx && (prop in ctx.deps || SERVICE_NAME.test(prop))) {
-                const type = ctx.deps[prop] || undefined;
+                const type = own(ctx.deps, prop) || undefined;
                 if (type || SERVICE_NAME.test(prop)) call = { receiver: `this.${prop}`, method, type };
               }
             }
@@ -1208,7 +1269,7 @@ class JsAnalyzer {
     controller.middleware = middleware;
     controller.markers = markers;
     controller.versions = versions;
-    controller.deps = this.facts.classes[name]?.deps ?? {};
+    controller.deps = own(this.facts.classes, name)?.deps ?? {};
     return controller;
   }
 
@@ -1255,7 +1316,7 @@ class JsAnalyzer {
         else if (d.name === 'Body') bodyType = keyArg ? bodyType ?? 'object' : type ?? 'object';
       }
     }
-    const callable = this.facts.callables[`${controller.className}.${methodName}`];
+    const callable = own(this.facts.callables, `${controller.className}.${methodName}`);
     const method: NestMethodFact = {
       name: methodName,
       pos,
@@ -1344,7 +1405,7 @@ class JsAnalyzer {
   private handleGlobalPrefix(node: t.CallExpression | t.OptionalCallExpression, scope: Scope): void {
     const arg = node.arguments[0];
     if (!arg || arg.type === 'SpreadElement' || arg.type === 'ArgumentPlaceholder') return;
-    const prefix = this.constPath(arg as Node, scope) ?? { parts: [{ dynamic: memberText(arg as Node) ?? shortLabel(arg as Node) }] };
+    const prefix = this.constPath(arg as Node, scope) ?? this.importRef(arg as Node, scope) ?? { parts: [{ dynamic: memberText(arg as Node) ?? shortLabel(arg as Node) }] };
     const exclude: { path: string; method?: HttpMethod }[] = [];
     const ex = this.objectProp(node.arguments[1] as Node | undefined, 'exclude');
     if (ex && unwrap(ex).type === 'ArrayExpression') {
@@ -1417,7 +1478,7 @@ class JsAnalyzer {
   }
 }
 
-const NEST_METHOD_DECORATORS_UPPER: Record<string, HttpMethod> = {
+const NEST_METHOD_DECORATORS_UPPER = table<HttpMethod>({
   GET: 'GET',
   POST: 'POST',
   PUT: 'PUT',
@@ -1426,7 +1487,7 @@ const NEST_METHOD_DECORATORS_UPPER: Record<string, HttpMethod> = {
   OPTIONS: 'OPTIONS',
   HEAD: 'HEAD',
   ALL: 'ALL',
-};
+});
 
 function bindingToRef(binding: Binding): RefExpr | undefined {
   switch (binding.kind) {

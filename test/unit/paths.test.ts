@@ -10,10 +10,28 @@ describe('joinUrlPaths', () => {
 });
 
 describe('normalizeForComparison', () => {
-  it('treats parameters of any syntax as equal', () => {
-    expect(normalizeForComparison('/users/:id')).toBe(normalizeForComparison('/users/{userId}'));
-    expect(normalizeForComparison('/users/{id:\\d+}')).toBe('/users/{}');
-    expect(normalizeForComparison('/users/:id(\\d+)')).toBe('/users/{}');
+  it('ignores parameter names in each framework\'s syntax', () => {
+    expect(normalizeForComparison('/users/:id')).toBe('/users/{}');
+    expect(normalizeForComparison('/users/:userId')).toBe('/users/{}');
+    expect(normalizeForComparison('/users/{userId}', 'spring')).toBe('/users/{}');
+    expect(normalizeForComparison('/files/{*rest}', 'spring')).toBe('/files/{*}');
+    expect(normalizeForComparison('/u/:id?')).toBe('/u/{}?');
+  });
+
+  it('keeps regex constraints, which make routes match different requests', () => {
+    expect(normalizeForComparison('/users/:id(\\d+)')).toBe('/users/{\\d+}');
+    expect(normalizeForComparison('/users/{id:\\d+}', 'spring')).toBe('/users/{\\d+}');
+    expect(normalizeForComparison('/users/:id(\\d+)')).not.toBe(normalizeForComparison('/users/:slug'));
+  });
+
+  it('treats a colon as literal text in Spring paths', () => {
+    expect(normalizeForComparison('/v1/users:batchGet', 'spring')).not.toBe(normalizeForComparison('/v1/users:batchDelete', 'spring'));
+  });
+
+  it('never treats unresolved expressions as wildcards', () => {
+    expect(normalizeForComparison('/${config.base}')).toBe('/${config.base}');
+    expect(normalizeForComparison('/${ROUTES.SHOPIFY}')).not.toBe(normalizeForComparison('/${ROUTES.INTERNAL}'));
+    expect(normalizeForComparison('/${API_BASE}/call/shopify', 'spring')).not.toBe(normalizeForComparison('/${API_BASE}/call/internalroute', 'spring'));
   });
 });
 

@@ -100,6 +100,16 @@ export interface Endpoint {
   parameters: EndpointParameter[];
   /** Source-level request body type name (Nest `@Body()`, Spring `@RequestBody`). */
   requestBodyType?: string;
+  /**
+   * Version selected outside the path (NestJS header, media-type or custom versioning). Routes
+   * with the same path but different versions are not duplicates.
+   */
+  version?: string;
+  /**
+   * Request conditions that narrow which requests match (Spring `params`, `headers`, `consumes`,
+   * `produces`), as written. Routes with different conditions are not duplicates.
+   */
+  conditions?: string[];
   /** Human-readable analysis notes (where a prefix came from, heuristics applied, ...). */
   notes: string[];
   /** Directory of the nearest project marker (package.json, pom.xml, build.gradle). Used to scope duplicates. */

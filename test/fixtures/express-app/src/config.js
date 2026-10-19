@@ -1,1 +1,1 @@
-module.exports = { customPath: '/custom' };
+module.exports = { customPath: process.env.CUSTOM_PATH || '/custom' };

@@ -1,4 +1,4 @@
-import type { PathExpr, PathPart } from './types';
+import type { Framework, PathExpr, PathPart } from './types';
 
 export function lit(value: string): PathExpr {
   return { parts: [{ lit: value }] };
@@ -49,17 +49,24 @@ export function joinUrlPaths(...segments: string[]): string {
 }
 
 /**
- * Normalises a route path for duplicate detection: parameters in any syntax (`:id`, `{id}`,
- * `{id:\d+}`) become `{}`.
+ * Normalises a route path for duplicate detection. Parameters become `{}` in the syntax of the
+ * framework that declared the route: `:id` for Express and NestJS, `{id}` for Spring (where `:` is
+ * literal text, as in `/users:batchGet`). Regex constraints are kept (`:id(\\d+)` → `{\\d+}`),
+ * because routes with different constraints match different requests. Parts that could not be
+ * resolved statically (`${expr}`) are kept verbatim: two different unknown expressions are not
+ * the same route.
  */
-export function normalizeForComparison(path: string): string {
-  return joinUrlPaths(
-    ...path.split('/').map((segment) =>
-      segment
-        .replace(/\{[^}]*\}/g, '{}')
-        .replace(/:[A-Za-z_$][\w$]*(\([^)]*\))?/g, '{}'),
-    ),
-  );
+export function normalizeForComparison(path: string, framework: Framework = 'express'): string {
+  const normalizeText = (text: string): string =>
+    framework === 'spring'
+      ? text.replace(/\{\s*(\*)?[^}:]*?(?::([^}]*))?\}/g, (_m, star: string | undefined, pattern: string | undefined) => `{${star ?? ''}${pattern ?? ''}}`)
+      : text.replace(/:[A-Za-z_$][\w$]*(?:\(([^)]*)\))?(\?)?/g, (_m, pattern: string | undefined, optional: string | undefined) => `{${pattern ?? ''}}${optional ?? ''}`);
+  // Split out `${...}` so neither syntax is applied inside unresolved expressions.
+  const normalized = path
+    .split(/(\$\{[^}]*\})/)
+    .map((piece) => (piece.startsWith('${') ? piece : normalizeText(piece)))
+    .join('');
+  return joinUrlPaths(normalized);
 }
 
 export interface OpenApiPathConversion {

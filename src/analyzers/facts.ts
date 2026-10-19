@@ -6,7 +6,7 @@
 import type { EndpointParameter, HttpMethod, PathExpr, ServiceCall } from '../core/types';
 
 /** Bump whenever the facts shape or extraction semantics change, to invalidate persisted caches. */
-export const FACTS_VERSION = 6;
+export const FACTS_VERSION = 7;
 
 export interface Pos {
   line: number;
@@ -81,6 +81,12 @@ export interface ExpressMountFact {
   paths: PathExpr[];
   /** All non-path arguments in order. The linker decides which are routers vs middleware. */
   args: MountChildCandidate[];
+  /**
+   * The first argument references an import that may be a path constant (`app.use(PATHS.V1, r)`)
+   * or middleware (`app.use(authenticate, r)`). If it resolves to a constant, it is the mount path
+   * and `args[0]` is dropped; otherwise it stays middleware.
+   */
+  maybePath?: PathExpr;
   pos: Pos;
   order: number;
 }
@@ -193,6 +199,12 @@ export interface JsFileFacts {
   nestModules: NestModuleFact[];
   nestRouterModule: NestRouterModuleRoute[];
   nestGlobalGuards: NestGlobalGuardFact[];
+  /**
+   * Exported string constants, for path parts that reference imports. Keys are export names,
+   * with members joined by dots: `ROUTES.SHOPIFY`, `default.BASE`, and plain keys for
+   * `module.exports = { BASE }`. Values may reference this file's own imports.
+   */
+  constants: Record<string, PathExpr>;
   /** Port from `app.listen(3000)` / `app.listen(process.env.PORT ?? 3000)`. */
   listenPort?: { port: number; pos: Pos };
   issues: FileIssue[];
@@ -205,6 +217,8 @@ export interface JsFileFacts {
 export interface JavaMapping {
   methods: HttpMethod[];
   paths: PathExpr[];
+  /** `params`, `headers`, `consumes` and `produces` attributes as written, e.g. `params = "type=a"`. */
+  conditions: string[];
 }
 
 export interface JavaMethodFact {

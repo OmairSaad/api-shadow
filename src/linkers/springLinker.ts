@@ -7,6 +7,7 @@ import type { JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, SpringC
 import { compactExpr, exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
 import type { Endpoint, PathExpr, PathPart, ServiceRef, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, shortFile } from './context';
+import { own } from '../core/records';
 
 interface ClassEntry {
   file: string;
@@ -67,7 +68,7 @@ export class SpringLinker {
   }
 
   private findClass(name: string, from: JavaFileFacts): ClassEntry | undefined {
-    const fqn = from.imports[name];
+    const fqn = own(from.imports, name);
     if (fqn && this.byFqn.has(fqn)) return this.byFqn.get(fqn);
     const samePackage = this.byFqn.get(from.packageName ? `${from.packageName}.${name}` : name);
     if (samePackage) return samePackage;
@@ -122,7 +123,7 @@ export class SpringLinker {
         const c = this.constants.get(`${owner}.${name}`);
         if (c) return c;
       }
-      const stat = entry.facts.staticImports[name];
+      const stat = own(entry.facts.staticImports, name);
       if (stat && this.constants.has(stat)) return this.constants.get(stat);
       if (stat) this.ctx.requestJavaClass(stat.split('.')[0]);
       for (const [k, cls] of Object.entries(entry.facts.staticImports)) {
@@ -195,6 +196,8 @@ export class SpringLinker {
             if (!isStatic) notes.push('Path references constants or expressions that could not be resolved statically.');
             if (owner !== entry) notes.push(`Mapping inherited from ${owner.cls.name}`);
             if (httpMethod === 'ALL') notes.push('No request method specified: matches all HTTP methods.');
+            const conditions = [...(classMapping?.conditions ?? []), ...(mapping.conditions ?? [])];
+            if (conditions.length) notes.push(`Matches only requests with ${conditions.join(', ')}`);
             const location = loc(owner.file, method.pos);
             const implMethod = impl ?? method;
             const implFile = impl ? entry.file : owner.file;
@@ -212,6 +215,7 @@ export class SpringLinker {
               services: this.services(implMethod, implFile === entry.file ? entry : owner),
               parameters: method.params,
               requestBodyType: method.bodyType,
+              conditions: conditions.length ? conditions : undefined,
               notes,
               projectRoot: this.ctx.projectRootOf(entry.file),
             };
