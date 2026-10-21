@@ -56,12 +56,61 @@ describe('Duplicate routes: no false positives', () => {
     expect(result.endpoints.filter((e) => e.path === '/items').map((e) => e.conditions)).toEqual([['params = "type=a"'], ['params = "type=b"']]);
     expect(dupMessages(result)).toEqual([]);
   });
-});
+
+  it('does not compare routers whose mount point was not found', async () => {
+    const router = (prefix: string): string => express(`router.get('/', (req, res) => res.end());\nrouter.post('/', (req, res) => res.end());\nrouter.get('/:${prefix}Id', (req, res) => res.end());`);
+    const { result } = await analyzeFiles({
+      'src/app.js': `const express = require('express'); const app = express();\nfor (const f of require('fs').readdirSync('./routes')) app.use('/' + f, require('./routes/' + f));`,
+      'src/routes/users.js': router('user'),
+      'src/routes/orders.js': router('order'),
+    });
+    expect(result.endpoints.filter((e) => e.method === 'POST')).toHaveLength(2);
+    expect(dupMessages(result)).toEqual([]);
+  });
+
+  it('does not report ALL middleware, a 405 fallback or a handler that calls next()', async () => {
+    const { result } = await analyzeFiles({
+      'src/routes.js': express(
+        [
+          `router.all('*', (req, res, next) => next());`,
+          `const auth = (req, res, next) => (req.user ? next() : res.sendStatus(401));`,
+          `router.all('/users', auth);`,
+          `router.route('/users').get((req, res) => res.end()).post((req, res) => res.end()).all((req, res) => res.status(405).end());`,
+          `router.post('/login', (req, res, next) => { req.started = Date.now(); next(); });`,
+          `router.post('/login', (req, res) => res.end());`,
+        ].join('\n'),
+      ),
+    });
+    expect(dupMessages(result)).toEqual([]);
+  });
+
+  it('separates POST routes of routers mounted at different prefixes', async () => {
+    const { result } = await analyzeFiles({
+      'src/app.ts': `import express from 'express'; import users from './users'; import orders from './orders';\nconst app = express();\napp.use('/users', users); app.use('/orders', orders);`,
+      'src/users.ts': `import { Router } from 'express'; const router = Router();\nrouter.post('/', (req, res) => res.end());\nexport default router;`,
+      'src/orders.ts': `import { Router } from 'express'; const router = Router();\nrouter.post('/', (req, res) => res.end());\nexport default router;`,
+    });
+    expect(routes(result.endpoints)).toEqual(['POST /orders', 'POST /users']);
+    expect(dupMessages(result)).toEqual([]);
+  });});
 
 describe('Duplicate routes: real duplicates are still found', () => {
   it('reports identical routes, including different parameter names', async () => {
     const { result } = await analyzeFiles({ 'src/routes.js': express(`router.get('/u/:id', (req, res) => res.end());\nrouter.get('/u/:userId', (req, res) => res.end());`) });
     expect(dupMessages(result)).toEqual([expect.stringContaining('GET /u/{} declared 2 times (routes.js:3, routes.js:4)')]);
+  });
+
+  it('reports duplicates within one unmounted router, and handlers that only forward errors', async () => {
+    const { result } = await analyzeFiles({
+      'src/routes.js': express(`router.post('/x', (req, res) => res.end());\nrouter.post('/x', (req, res) => res.end());\nrouter.put('/y', async (req, res, next) => { try { res.end(); } catch (e) { next(e); } });\nrouter.put('/y', (req, res) => res.end());`),
+    });
+    expect(dupMessages(result)).toEqual([expect.stringContaining('POST /x declared 2 times'), expect.stringContaining('PUT /y declared 2 times')]);
+  });
+
+  it('reports ALL that ends the request before a specific route as unreachable', async () => {
+    const { result } = await analyzeFiles({ 'src/routes.js': express(`router.all('/u', (req, res) => res.end());\nrouter.get('/u', (req, res) => res.end());`) });
+    expect(dupMessages(result)).toEqual([]);
+    expect(result.issues.filter((i) => i.kind === 'unreachable').map((i) => i.message)).toEqual([expect.stringContaining('GET /u is unreachable')]);
   });
 
   it('reports routes made identical through imported constants', async () => {

@@ -7,10 +7,10 @@
 import { execFile, spawn } from 'child_process';
 import * as path from 'path';
 import type { FileHost, FileStat } from './engine';
-import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, globToRegExp } from './exclude';
+import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, TSCONFIG_GLOB, globToRegExp } from './exclude';
 
 const GIT_ARGS = ['-c', 'core.fsmonitor=false', '-c', 'core.quotepath=off'];
-const INCLUDES = [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB].map(globToRegExp);
+const INCLUDES = [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB, TSCONFIG_GLOB].map(globToRegExp);
 
 function git(cwd: string, args: string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -41,6 +41,33 @@ export async function gitRefs(repoRoot: string): Promise<{ name: string; kind: '
       if (r.startsWith('refs/remotes/')) return { name: r.slice(13), kind: 'remote' as const };
       return { name: r.slice(10), kind: 'tag' as const };
     });
+}
+
+/** The commit a revision points to, or undefined (no commits yet, unknown ref). */
+export async function gitCommit(repoRoot: string, ref = 'HEAD'): Promise<string | undefined> {
+  if (ref.startsWith('-')) return undefined;
+  try {
+    const commit = (await git(repoRoot, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim();
+    return /^[0-9a-f]{7,64}$/.test(commit) ? commit : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Contents of one file at a revision (`git cat-file blob <commit>:<path>`), or undefined when the
+ * file does not exist there. `file` is absolute and must be inside the repository.
+ */
+export async function gitFileAt(repoRoot: string, ref: string, file: string): Promise<string | undefined> {
+  const rel = path.relative(repoRoot, file).split(path.sep).join('/');
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return undefined;
+  const commit = await gitCommit(repoRoot, ref);
+  if (!commit) return undefined;
+  try {
+    return await git(repoRoot, ['cat-file', 'blob', `${commit}:${rel}`], 32 * 1024 * 1024);
+  } catch {
+    return undefined;
+  }
 }
 
 export class GitFileHost implements FileHost {

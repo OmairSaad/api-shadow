@@ -7,19 +7,20 @@
 import type { FileFacts, JsFileFacts } from '../analyzers/facts';
 import { compactExpr } from '../core/paths';
 import type { PathExpr, PathPart } from '../core/types';
-import { resolveModule } from './context';
 import { own } from '../core/records';
 
 const MAX_DEPTH = 8;
 
 export type FactsLookup = (file: string) => FileFacts | undefined;
+/** Resolves an import specifier from a file to a discovered file. */
+export type ModuleResolver = (fromFile: string, specifier: string) => string | undefined;
 
 function hasRefs(expr: PathExpr): boolean {
   return expr.parts.some((p) => 'ref' in p);
 }
 
 /** Facts with every reference in route, mount and prefix paths resolved (or made dynamic). */
-export function resolveJsFacts(file: string, facts: JsFileFacts, lookup: FactsLookup, allFiles: ReadonlySet<string>): JsFileFacts {
+export function resolveJsFacts(file: string, facts: JsFileFacts, lookup: FactsLookup, resolveModule: ModuleResolver): JsFileFacts {
   const all = [
     ...facts.routes.flatMap((r) => r.paths),
     ...facts.mounts.flatMap((m) => m.paths),
@@ -27,7 +28,7 @@ export function resolveJsFacts(file: string, facts: JsFileFacts, lookup: FactsLo
     ...(facts.nestGlobalPrefix ? [facts.nestGlobalPrefix.prefix] : []),
   ];
   if (!all.some(hasRefs) && !facts.mounts.some((m) => m.maybePath)) return facts;
-  const resolver = new Resolver(lookup, allFiles);
+  const resolver = new Resolver(lookup, resolveModule);
   const r = (expr: PathExpr): PathExpr => (hasRefs(expr) ? resolver.expr(file, facts, expr, 0) : expr);
   return {
     ...facts,
@@ -46,7 +47,7 @@ export function resolveJsFacts(file: string, facts: JsFileFacts, lookup: FactsLo
 class Resolver {
   constructor(
     private readonly lookup: FactsLookup,
-    private readonly allFiles: ReadonlySet<string>,
+    private readonly resolveModule: ModuleResolver,
   ) {}
 
   expr(file: string, facts: JsFileFacts, expr: PathExpr, depth: number): PathExpr {
@@ -75,7 +76,7 @@ class Resolver {
 
   private exported(fromFile: string, source: string, key: string, depth: number): PathExpr | undefined {
     if (depth >= MAX_DEPTH) return undefined;
-    const target = resolveModule(fromFile, source, this.allFiles);
+    const target = this.resolveModule(fromFile, source);
     if (!target) return undefined;
     const facts = this.lookup(target);
     if (facts?.lang !== 'js') return undefined;

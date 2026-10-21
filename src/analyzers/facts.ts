@@ -3,14 +3,78 @@
  * sessions; cross-file reasoning (router mounting, constant resolution, service lookup) happens
  * later in the linkers, which only ever see facts, never source code.
  */
-import type { EndpointParameter, HttpMethod, PathExpr, ServiceCall } from '../core/types';
+import type { EndpointParameter, HttpMethod, PathExpr, SecurityRuleId, ServiceCall, Shape } from '../core/types';
+
+export type { SecurityRuleId, Shape, ShapeProp } from '../core/types';
 
 /** Bump whenever the facts shape or extraction semantics change, to invalidate persisted caches. */
-export const FACTS_VERSION = 8;
+export const FACTS_VERSION = 11;
 
 export interface Pos {
   line: number;
   column: number;
+}
+
+/** A response a handler sends: `res.status(404).json({...})`, `ctx.body = x`, `return x`. */
+export interface ResponseFact {
+  /** Undefined when the framework default applies (200, or 201 for Nest POST). */
+  status?: number;
+  shape?: Shape;
+  via: 'json' | 'send' | 'body' | 'return' | 'status' | 'throw';
+  pos: Pos;
+}
+
+/** Evidence for a potential security issue. `evidence` is short and never contains a secret value. */
+export interface RiskFact {
+  rule: SecurityRuleId;
+  pos: Pos;
+  evidence: string;
+  /** Rule-specific qualifier, e.g. `credentials` for CORS with credentials, `stack` for stack traces. */
+  detail?: string;
+}
+
+/** What a handler body does, as far as syntax shows. */
+export interface BodyFacts {
+  responses?: ResponseFact[];
+  risks?: RiskFact[];
+  /** Data access calls (`User.findById`, `prisma.user.update`, `userRepository.save`). */
+  dataAccess?: string[];
+  /** Reads the authenticated user (`req.user`, `ctx.state.user`, `request.user`). */
+  readsUser?: boolean;
+  /** Passes a path parameter (`req.params.id`) to a data access call. */
+  paramIdToData?: boolean;
+}
+
+/** A response field read by client code: `data.user.name` → `user.name`; array items are `[]`. */
+export interface ReadFact {
+  path: string;
+  pos: Pos;
+  /** Function or component where the read happens. */
+  within?: string;
+}
+
+/**
+ * A call to a function that may return an API response (`getUser(id)` imported from a service
+ * module), with the fields read from its result. Paths are relative to the returned value: the
+ * linker strips `data` (axios) or `body` (supertest) once it knows what the function returns.
+ */
+export interface ConsumerCallFact {
+  callee: RefExpr;
+  reads: ReadFact[];
+  pos: Pos;
+  /** Enclosing function or component, e.g. `UserProfile`. */
+  within?: string;
+}
+
+/** How a value relates to an HTTP response: see `jsConsumers.ts`. */
+export type BodyStage = 'body' | 'axios' | 'agent' | 'fetch' | 'raw';
+
+/** A function that returns (part of) the response of a client call or of another consumer call. */
+export interface ReturnsBodyFact {
+  call?: number;
+  consumer?: number;
+  stage: BodyStage;
+  path: string;
 }
 
 export interface FileIssue {
@@ -67,8 +131,12 @@ export interface HandlerFact {
   serviceCalls: ServiceCall[];
   /** Parameter count of an inline handler (Express passes `next` third, Koa second). */
   arity?: number;
+  /** Indexes of parameters an inline handler calls without arguments (`next()`): it hands the request on. */
+  forwards?: number[];
   /** Inline handler checks the request body against a schema (`schema.parse(req.body)`). */
   validatesBody?: boolean;
+  /** Responses, risks and data access of an inline handler. */
+  body?: BodyFacts;
 }
 
 export interface ExpressRouteFact {
@@ -124,8 +192,16 @@ export interface CallableFact {
   serviceCalls: ServiceCall[];
   /** Parameter count. */
   arity?: number;
+  /** Indexes of parameters called without arguments (`next()`). */
+  forwards?: number[];
   /** Checks the request body against a schema. */
   validatesBody?: boolean;
+  /** Responses, risks and data access, for functions that look like request handlers. */
+  body?: BodyFacts;
+  /** The function returns (part of) an HTTP response body. */
+  returnsBody?: ReturnsBodyFact;
+  /** Name of the function's file-level owner (class), for display. */
+  owner?: string;
 }
 
 export interface ClassFact {
@@ -156,6 +232,11 @@ export interface NestMethodFact {
   /** Pipes passed to `@Body(...)`. */
   bodyPipes?: string[];
   serviceCalls: ServiceCall[];
+  /** `@HttpCode(n)`. */
+  httpCode?: number;
+  /** Declared return type (`Promise<UserDto>` → `UserDto`). */
+  returnType?: string;
+  body?: BodyFacts;
 }
 
 export interface NestControllerFact {
@@ -213,6 +294,10 @@ export interface ClientCallFact {
   pos: Pos;
   start: Pos;
   end: Pos;
+  /** Response fields read from this call's result in the same function. */
+  reads?: ReadFact[];
+  /** Enclosing function or component. */
+  within?: string;
 }
 
 export interface JsFileFacts {
@@ -235,6 +320,12 @@ export interface JsFileFacts {
   /** `app.useGlobalPipes(new ValidationPipe())` and `{ provide: APP_PIPE, ... }`. */
   nestGlobalPipes: NestGlobalGuardFact[];
   clientCalls: ClientCallFact[];
+  /** Calls to functions that may return API responses, with the fields read from their results. */
+  consumers: ConsumerCallFact[];
+  /** File-level security evidence (CORS configuration). Secrets come from the text scan. */
+  risks: RiskFact[];
+  /** Exported TypeScript interfaces and type aliases with literal members, for response types. */
+  types: Record<string, Shape>;
   /**
    * Exported string constants, for path parts that reference imports. Keys are export names,
    * with members joined by dots: `ROUTES.SHOPIFY`, `default.BASE`, and plain keys for
@@ -267,13 +358,28 @@ export interface JavaMethodFact {
   /** The `@RequestBody` parameter is annotated `@Valid` / `@Validated`. */
   bodyValidated?: boolean;
   calls: ServiceCall[];
+  /** Declared return type with generics, e.g. `ResponseEntity<List<UserDto>>`. */
+  returnType?: string;
+  /** `@ResponseStatus(HttpStatus.CREATED)`. */
+  status?: number;
+  /** Request-handling risks found in the method body. */
+  risks?: RiskFact[];
+}
+
+/** A field as Jackson would serialise it. */
+export interface JavaFieldFact {
+  type: string;
+  /** `@JsonIgnore`, or `@JsonProperty(access = WRITE_ONLY)`. */
+  ignored?: boolean;
+  /** `@JsonProperty("name")`. */
+  jsonName?: string;
 }
 
 export interface JavaClassFact {
   name: string;
   /** Outer classes, outermost first. */
   outer: string[];
-  kind: 'class' | 'interface';
+  kind: 'class' | 'interface' | 'record';
   pos: Pos;
   isController: boolean;
   isAbstract: boolean;
@@ -283,6 +389,10 @@ export interface JavaClassFact {
   implements: string[];
   /** field name -> simple type name */
   fields: Record<string, string>;
+  /** Instance fields and record components with their JSON view, for response shapes. */
+  jsonFields?: Record<string, JavaFieldFact>;
+  /** `@Entity`, `@Document` or `@Table`. */
+  isEntity?: boolean;
   methods: JavaMethodFact[];
 }
 
@@ -300,6 +410,8 @@ export interface JavaFileFacts {
   clientCalls: ClientCallFact[];
   /** A class that configures Spring Security (`SecurityFilterChain` bean, `@EnableWebSecurity`, ...). */
   securityConfig?: { className: string; pos: Pos };
+  /** CORS configuration and similar file-level evidence. */
+  risks?: RiskFact[];
   issues: FileIssue[];
 }
 
@@ -312,6 +424,18 @@ export interface SpringConfigFacts {
   contextPath?: string;
   servletPath?: string;
   serverPort?: number;
+  /** Settings that expose internals (`server.error.include-stacktrace=always`, actuator `*`). */
+  risks?: RiskFact[];
+  issues: FileIssue[];
+}
+
+/** Module path aliases from `tsconfig.json` / `jsconfig.json`. */
+export interface TsConfigFacts {
+  lang: 'tsconfig';
+  /** Relative to the config file's folder, as written. */
+  baseUrl?: string;
+  /** `@/*` → `['src/*']`, relative to `baseUrl` (or the config folder). */
+  paths: Record<string, string[]>;
   issues: FileIssue[];
 }
 
@@ -320,4 +444,4 @@ export interface SkippedFacts {
   issues: FileIssue[];
 }
 
-export type FileFacts = JsFileFacts | JavaFileFacts | SpringConfigFacts | SkippedFacts;
+export type FileFacts = JsFileFacts | JavaFileFacts | SpringConfigFacts | TsConfigFacts | SkippedFacts;

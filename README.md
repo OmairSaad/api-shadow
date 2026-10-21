@@ -11,6 +11,11 @@ API Shadow also connects the dots across your codebase:
 - **Callers and tests** for every endpoint, from supertest, NestJS e2e specs and Spring MockMvc.
 - **Auth and validation checks**: write and admin endpoints without auth, and request bodies nobody validates.
 - **API diff against any branch**, with breaking changes flagged, ready to paste into a pull request.
+- **Change impact**: rename `user.name` to `user.fullName` in a handler and API Shadow points at the React component that still reads `user.name`, with a quick fix.
+- **OpenAPI contract diffs** between git revisions, classified as breaking, potentially breaking, non-breaking or informational.
+- **Security Radar**: hardcoded credentials, permissive CORS, mass assignment, injection, missing auth and more, each with evidence, confidence and a mitigation.
+- **Dependency graph** from component to API function, request, route, handler, service and repository.
+- **Generated API tests** (Jest, Vitest, Mocha with Supertest; JUnit with MockMvc) as editable starting points.
 - **Try it**: a ready-to-send request for any endpoint, plus cURL and `.http` exports.
 
 Everything runs locally. There are no accounts, servers, telemetry or AI services, and your code never leaves your machine.
@@ -30,6 +35,79 @@ Everything runs locally. There are no accounts, servers, telemetry or AI service
 The status bar shows the endpoint count and any potential duplicate routes. Click it to open the sidebar.
 
 ## Features
+
+### Dashboard
+
+**API Shadow: Open Dashboard** (or click the status bar item) opens one page with everything API Shadow knows about the workspace:
+
+- **Overview**: endpoint counts by method and framework, matched and unmatched frontend requests, potentially unused routes, potential breaking changes, security findings, and how much of the analysis is certain.
+- **API Explorer**: a searchable inventory filtered by method, framework, callers, auth and confidence. Select an endpoint to see its parameters, inferred response, middleware, services, frontend callers (with the fields they read) and tests. A *Frontend requests* view lists every request with its matched route, and *Coverage findings* lists unmatched requests, potentially unused routes, dynamic routes that need a review, duplicate candidates and unreachable routes.
+- **Impact Analysis**, **Security**, **Dependency Graph**, **Contracts** and **Test Generator**, described below.
+
+The dashboard follows your theme, works with the keyboard, and only shows data from the analysis of your workspace.
+
+### Change impact: what breaks if this API changes
+
+API Shadow infers what each handler responds with (object literals, local constants, `.map()` over arrays, status codes, thrown NestJS exceptions, declared DTO types, Spring DTOs, records and Jackson annotations). It also follows each frontend request to the fields that are read from its response: through `await`, `.then()`, `res.json()`, axios `data`, supertest `body`, destructuring, React `useState`, react-query `queryFn`, and service functions in other files (`getUser()` in a component, `axios.get()` in `services/user.js`).
+
+When you change a handler, the current code is compared with a baseline (by default **the last commit**, so uncommitted changes are the change) and you see:
+
+```
+Potential breaking change since HEAD (3f2a9c1): GET /api/users/:id — Response field `user.name`
+renamed to `user.fullName`. `user.name` may have been replaced by `user.fullName`. Risk: HIGH (confirmed).
+```
+
+…in the Problems panel at `UserProfile.jsx`, with a quick fix to use `fullName`, and at the endpoint itself, listing every affected read. **API Shadow: Analyze Change Impact** opens the full report: changed paths and methods, removed, renamed and retyped response fields, new required parameters, changed status codes and auth, the callers of each changed endpoint, and the components that receive their data.
+
+- **Confirmed** means a read of the changed field was found. **Heuristic** means callers exist, but how they use the response couldn't be traced.
+- **API Shadow: Set Impact Baseline…** compares with a branch or tag instead (e.g. `main`, to review a whole branch) or with the current state.
+- Without git, or in an untrusted workspace, the first analysis of the session is the baseline.
+
+The same response shapes also catch mistakes without any change: a component that reads `user.name` from an endpoint that only returns `{ id, fullName }` is flagged where it reads it, with *Did you mean `fullName`?*.
+
+### API contracts (OpenAPI)
+
+**API Shadow: Compare API Contracts (OpenAPI)…** finds OpenAPI 3.x documents (JSON or YAML) and compares:
+
+- the working tree with a branch, tag or commit;
+- two git revisions;
+- two files;
+- a contract with the implementation (documented operations with no route in code, and routes the contract doesn't document).
+
+Every difference is classified as **breaking** (removed operations or response fields, new required inputs, changed types, auth newly required), **potentially breaking** (response fields that may now be missing, changed success status, new enum values in responses), **non-breaking** (additions) or **informational** (auth removed, deprecations, new error statuses). Local `$ref`s and `allOf` are resolved; remote references are reported, never fetched. Without a contract, **Compare API with Branch or Tag…** compares the API inferred from code; it is labelled best effort.
+
+### Security Radar
+
+The **Security** view and dashboard tab list potential API risks found in the code:
+
+| Rule | Looks for |
+|---|---|
+| `hardcoded-secret` | Provider keys (AWS, GitHub, Stripe, Slack, Google, …), private keys, credentials in connection strings, literal passwords, tokens and JWT or session secrets, in source and Spring configuration |
+| `sensitive-response` | Response fields such as `passwordHash`, `ssn` or `cardNumber`, and whole user records sent straight from the database |
+| `missing-auth` | Write and admin endpoints with no recognizable auth, in projects where other endpoints have auth (middleware inherited from parent routers counts) |
+| `permissive-cors` | `cors()` for all origins, reflected origins with credentials, `Access-Control-Allow-Origin: *`, `@CrossOrigin`, `allowedOrigins("*")` |
+| `mass-assignment` | The whole request body written to a model (`User.create(req.body)`), or a Spring `@Entity` bound as `@RequestBody` |
+| `object-authorization` | A path id passed to data access on a protected route that never reads the current user or checks ownership |
+| `injection` | Request input in SQL strings, shell commands, `eval`, or used as a whole database filter |
+| `open-redirect` | Redirects to a location taken from the request |
+| `path-traversal` | File paths built from request input |
+| `error-details` | Stack traces, exception messages and error objects sent to clients, and Spring settings that include them |
+| `config-exposure` | Actuator endpoints such as `env` or `heapdump` exposed by configuration |
+
+Every finding has a rule id, severity, confidence, evidence, an explanation and a recommended mitigation. These are **potential** issues, not confirmed vulnerabilities. Dismiss false positives (they stay dismissed in this workspace), turn rules off with `apiShadow.security.disabledRules`, and exclude files with `apiShadow.security.exclude`. High-severity findings also appear in the Problems panel (`apiShadow.diagnostics.security`).
+
+### Dependency graph
+
+**API Shadow: Show Dependency Graph** draws how requests flow through the code: components → API functions → requests and tests → endpoints → handlers → services → repositories and models. Click a node to highlight everything upstream and downstream of it, double-click (or press **O**) to open its source. Filter by method and framework, focus on matching endpoints, and show only what the current change affects. Unmatched requests (dashed), endpoints without callers (faded), ambiguous matches (dotted edges) and impacted nodes (red outline) are marked. Large APIs show the most connected endpoints first (`apiShadow.graph.maxEndpoints`). Export as Mermaid or JSON.
+
+### Generate API tests
+
+**API Shadow: Generate API Tests…** (also on an endpoint's context menu) writes test files you can edit:
+
+- **Node**: Jest, Vitest or Mocha (detected from `package.json`) with Supertest. The app module is found automatically (`module.exports = app`); NestJS tests bootstrap `AppModule`, Fastify tests wait for `app.ready()`.
+- **Spring**: JUnit 5 with `@WebMvcTest` and MockMvc, with `@MockitoBean` (Spring Boot 3.4+) or `@MockBean` fields for the controller's services.
+
+Expectations are only written where the code supports them: a 404 test only if the handler sends 404, response properties from the inferred shape, auth tests only for endpoints with detected auth. Anything else is a `TODO` or a pending test (`it.todo`), so a generated file never passes by accident. The files are previewed first and only written when you confirm; existing files are never overwritten, and tests are never run for you. Missing setup (no runner, no Supertest, an app that isn't exported) is listed before you create them.
 
 ### Every endpoint, with its real path
 
@@ -133,6 +211,8 @@ The Issues view also lists what could not be analyzed (syntax errors, unresolved
 
 ### Export to Markdown, OpenAPI 3.0 and .http
 
+**API Shadow: Export Analysis Report** writes one Markdown report with the overview, change impact, coverage findings, security findings and the endpoint inventory.
+
 Export everything to a Markdown report, to an **OpenAPI 3.0** document, or to a `.http` request collection. The OpenAPI export contains only what was found in code; request and response schemas are never invented. Endpoints OpenAPI can't represent exactly are listed under `x-api-shadow.skipped` with the reason, rather than approximated.
 
 ![A Markdown export of all endpoints rendered in VS Code's Markdown preview, with a table per controller listing method, path, handler, middleware, services and source location.](media/export.png)
@@ -210,15 +290,20 @@ Decorators are recognized only when imported from `@nestjs/*` (aliases are suppo
 API Shadow reports what it can prove from the code. When something can't be resolved, it says so in the Issues view instead of guessing.
 
 - **No execution or type checking.** Paths built at runtime (from environment variables, configuration objects or function results) appear as `${expression}`, are marked *dynamic*, and are left out of the OpenAPI export.
-- **Express**: routers passed through arbitrary data structures or dependency-injection containers, dynamic `require` paths and routes registered in loops are not followed. Only relative imports are resolved; tsconfig `paths` aliases and `#imports` aren't.
+- **Express**: routers passed through arbitrary data structures or dependency-injection containers, dynamic `require` paths and routes registered in loops are not followed. Relative imports, `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl` (from the nearest config; `extends` isn't followed) and the `@/` → `src/` convention are resolved; `package.json` `#imports` and bundler-only aliases (Vite, webpack) aren't.
 - **NestJS**: middleware configured with `consumer.apply(...).forRoutes(...)` and controllers registered by dynamic modules at runtime aren't shown. One `setGlobalPrefix` per project is used.
 - **Spring**: Kotlin controllers are **not supported** (they're reported in the Issues view). Profile-specific configuration (`application-<profile>.yml`), `${...}` placeholders, custom composed mapping annotations, functional routing (`RouterFunction`) and Spring Data REST repositories aren't analyzed.
-- **Other frameworks** (Fastify, Koa, Hapi, Micronaut, JAX-RS, …) aren't supported yet.
+- **Other frameworks** (Hapi, Micronaut, JAX-RS, …) aren't supported yet.
+- **Response shapes** are inferred from literals, local constants and declared types. Values from databases, other functions or generic wrappers are *unknown*, and API Shadow only reports a missing or removed field when the object is fully known (no spreads or unknown parts). TypeScript interfaces are read from the file that declares them; types from packages and complex generics aren't resolved.
+- **Response reads** are followed within a function, into functions that return the response (also across files, through relative imports and path aliases), React `useState` and react-query. Data passed to child components as props, stores (Redux, Pinia), Angular services injected with `this.service`, and service modules imported through custom alias prefixes other than `@/`, `~/` and `#/` (e.g. `@app/…`) aren't followed.
+- **Security Radar** findings are heuristics from syntax. They don't prove a vulnerability, and they can't prove an endpoint is safe: authorization in custom wrappers, gateways or database policies isn't visible.
+- **Impact against git** needs a trusted workspace and analyzes the baseline revision once per commit, which can take a few seconds in large repositories.
+- `.gitignore` is applied from the root of each workspace folder only; nested `.gitignore` files and negated patterns aren't.
 - Unsaved editor changes are picked up when you save. Files over 512 KB and test files are skipped by default (both configurable).
 - Duplicate detection compares method and path with parameter names ignored, within one project. Routes that differ in Spring `params`/`headers`/`consumes`/`produces` conditions or in a NestJS header-selected version are not duplicates. Hosts and Express `router.route()` conditions aren't considered. Parts that can't be resolved statically never make two routes equal unless they are the same expression.
 - **Client calls** are matched by URL. Calls whose whole URL is a variable (`fetch(url)`), URLs built by helper functions, and GraphQL or WebSocket traffic aren't linked. Calls through an imported client instance are matched on the path suffix, because the instance's base URL is in another file.
 - **Unreachable routes** are found within one router chain in one file at each level. Routes registered from different files on the same router, and NestJS ordering across controllers, aren't compared.
-- **API diff** needs a trusted workspace (it runs `git`) and compares the working tree against a commit; it doesn't compare two commits with each other.
+- **API diff** needs a trusted workspace (it runs `git`) and compares the working tree against a commit. **Contract comparison** can also compare two commits.
 - **Fastify** `@fastify/autoload` and **Koa** routers created in one file and given a prefix in another aren't followed.
 - **Auth detection** matches names of middleware, guards, annotations and decorators (configurable with `apiShadow.auth.patterns`). It shows that an auth check is applied, not that it is correct. Checks inside handlers (`if (!req.user)`), per-path rules in a Spring Security filter chain, and NestJS `consumer.apply()` middleware aren't seen.
 
@@ -240,10 +325,21 @@ API Shadow reports what it can prove from the code. When something can't be reso
 | `API Shadow: Show Request Flow` | Diagram of callers, mounts, middleware, auth, handler and services for an endpoint |
 | `API Shadow: Show Callers` | Peek the frontend code and tests that call an endpoint |
 | `API Shadow: Compare API with Branch or Tag…` | Report added, removed, changed and breaking endpoints against a git revision |
+| `API Shadow: Open Dashboard` | Overview, API explorer, impact, security, graph, contracts and test generation |
+| `API Shadow: Analyze Change Impact` | Show what the current changes may break, compared with the impact baseline |
+| `API Shadow: Set Impact Baseline…` | Compare with the last commit, a branch or tag, or the current state |
+| `API Shadow: Compare API Contracts (OpenAPI)…` | Compare an OpenAPI document across revisions, with another file, or with the implementation |
+| `API Shadow: Run Security Analysis` | Re-analyze and show the Security Radar |
+| `API Shadow: Show Dependency Graph` | Interactive graph from components to repositories |
+| `API Shadow: Generate API Tests…` | Preview and create test files for selected endpoints |
+| `API Shadow: Export Analysis Report` | Write the full Markdown report |
+| `API Shadow: Export Dependency Graph…` | Write the graph as Mermaid or JSON |
+| `API Shadow: Turn Off Security Rule…` | Add a rule to `apiShadow.security.disabledRules` (asks first) |
+| `API Shadow: Restore Dismissed Security Findings` | Show dismissed findings again |
 | `API Shadow: Clear Analysis Cache and Re-analyze` | Drop cached results and start over |
 | `API Shadow: Show Log` | Open the *API Shadow* log (set its level with *Developer: Set Log Level…*) |
 
-Right-click an endpoint for *Go to Handler*, *Open as HTTP Request*, *Show Request Flow*, *Show Callers*, *Copy Path*, *Copy Method and Path* and *Copy as cURL*. The ▷ button on an endpoint row opens its request.
+Right-click an endpoint for *Go to Handler*, *Open as HTTP Request*, *Show Request Flow*, *Show Callers*, *Generate API Tests…*, *Copy Path*, *Copy Method and Path* and *Copy as cURL*. The ▷ button on an endpoint row opens its request.
 
 ## Settings
 
@@ -276,15 +372,40 @@ Right-click an endpoint for *Go to Handler*, *Open as HTTP Request*, *Show Reque
 | `apiShadow.diagnostics.brokenCalls` | `true` | Underline calls to routes that don't exist |
 | `apiShadow.tests.enabled` | `true` | Read test files for endpoint test coverage |
 | `apiShadow.validation.enabled` | `true` | Detect request bodies without validation |
+| `apiShadow.respectGitignore` | `true` | Skip files matched by the root `.gitignore` of each workspace folder |
+| `apiShadow.responseChecks.enabled` | `true` | Report client reads of response fields an endpoint doesn't return |
+| `apiShadow.diagnostics.responseMismatch` | `true` | Show those reads in the Problems panel |
+| `apiShadow.impact.enabled` | `true` | Analyze the impact of API changes on client code |
+| `apiShadow.impact.baseline` | `gitHead` | Compare with the last commit (`gitHead`) or with the first analysis of the session (`session`) |
+| `apiShadow.diagnostics.impact` | `true` | Show potential breaking changes in the Problems panel |
+| `apiShadow.security.enabled` | `true` | Run the Security Radar |
+| `apiShadow.security.disabledRules` | `[]` | Security rules to skip |
+| `apiShadow.security.exclude` | `[]` | Glob patterns of files that get no security findings |
+| `apiShadow.diagnostics.security` | `high` | Lowest severity shown in the Problems panel: `high`, `medium`, `low` or `off` |
+| `apiShadow.contracts.files` | `[]` | Extra glob patterns for OpenAPI documents |
+| `apiShadow.graph.maxEndpoints` | `150` | Maximum endpoints drawn in the dependency graph |
+| `apiShadow.testGeneration.directory` | `""` | Folder for generated tests, relative to the project root |
 
 `node_modules`, `.git`, `dist`, `out`, `build`, `target`, `coverage`, `.next`, `.gradle` and similar folders are always excluded.
 
 ## Privacy and security
 
-- **Your code is never executed.** Files are only read and parsed. Nothing is required, compiled or evaluated, so API Shadow also works in Restricted Mode. The one exception is **Compare API with Branch or Tag…**, which runs `git` (`rev-parse`, `ls-tree`, `cat-file`, `for-each-ref`, none of which run hooks) and is only available in trusted workspaces.
+- **Your code is never executed.** Files are only read and parsed. Nothing is required, compiled or evaluated, endpoints are never called, and generated tests are never run, so API Shadow also works in Restricted Mode. The exceptions are comparisons with git revisions (**Compare API with Branch or Tag…**, contract comparison and the git impact baseline), which run `git` (`rev-parse`, `ls-tree`, `cat-file`, `for-each-ref`, none of which run hooks) and are only available in trusted workspaces.
 - **Nothing leaves your machine.** API Shadow makes no network requests and has no telemetry or AI services. **Try it** and **Copy as cURL** only produce text. Requests are sent only when you send them yourself, with REST Client or cURL.
-- **Secrets stay put.** `.env` files are never read. From Spring configuration files, only the context-path and `server.port` settings are kept; every other value is discarded immediately and never logged, cached or exported. Middleware labels never include call arguments, so a call such as `basicAuth({ users: { admin: '…' } })` appears as `basicAuth()`.
+- **Secrets stay put.** `.env` files are never read. From Spring configuration files, only the context-path, `server.port` and error/actuator exposure settings are kept; every other value is discarded immediately and never logged, cached or exported. When the Security Radar finds a credential, it keeps only the variable name, a known provider prefix (such as `sk_live_`) and the length; no character of the secret itself is stored, cached or shown. Middleware labels never include call arguments, so a call such as `basicAuth({ users: { admin: '…' } })` appears as `basicAuth()`.
+- **Nothing is written without you.** Generated tests are previewed and written only after you confirm, never over an existing file, and only inside the workspace. Quick fixes are applied only when you choose them. Turning off a security rule asks before changing workspace settings. Dismissed findings are stored in VS Code's workspace state.
+- **The dashboard is sandboxed.** It runs with a strict Content Security Policy (no remote content, only the extension's own script), shows every value as text, and can only ask the extension to open source locations the extension gave it or run a fixed list of API Shadow commands.
 - The cache holds only structural facts (routes, names, line numbers), stores them in VS Code's workspace storage, and can be cleared at any time.
+
+## Troubleshooting
+
+- **No endpoints are found.** Check the **Issues** view for parse errors and skipped files, and **API Shadow: Show Log**. Folders in `apiShadow.exclude`, `files.exclude` or the root `.gitignore` are skipped (see `apiShadow.respectGitignore`).
+- **Impact analysis says "session start".** The workspace isn't a git repository, has no commits, or isn't trusted. Trust the workspace, or choose a baseline with **Set Impact Baseline…**.
+- **A change isn't reported.** Impact is computed when files are saved. Response fields are only compared when the handler builds the response from literals or a declared type; if it returns a database row or a service result, the shape is unknown.
+- **A security finding is a false positive.** Dismiss it from the Security view or the quick fix menu, exclude the files with `apiShadow.security.exclude`, or turn the rule off. If your auth middleware isn't recognized, add its name to `apiShadow.auth.patterns`.
+- **Generated tests can't import the app.** Export the app from its module (`module.exports = app` / `export default app`) without calling `listen()` on import, so tests can start it themselves.
+- **The graph is crowded.** Type a path or controller in *Focus on endpoints matching…*, filter by method, or turn on *Impacted only*.
+- **Stale results.** Run **API Shadow: Clear Analysis Cache and Re-analyze**.
 
 ## Contributing
 

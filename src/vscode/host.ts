@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import type { FileHost, FileStat } from '../core/engine';
-import { CONFIG_GLOB, DEFAULT_EXCLUDED_DIRS, MARKER_GLOB, PathExcluder, SOURCE_GLOB, defaultExcludeGlobs } from '../core/exclude';
+import { CONFIG_GLOB, DEFAULT_EXCLUDED_DIRS, MARKER_GLOB, PathExcluder, SOURCE_GLOB, TSCONFIG_GLOB, defaultExcludeGlobs } from '../core/exclude';
 import type { CancellationLike } from '../core/types';
-import { filesExcludeGlobs, type ApiShadowConfig } from './config';
+import { filesExcludeGlobs, gitignoreGlobs, type ApiShadowConfig } from './config';
 
 /**
  * Discovers files with `workspace.findFiles` (ripgrep-backed, fast) and reads them through
@@ -10,6 +10,9 @@ import { filesExcludeGlobs, type ApiShadowConfig } from './config';
  */
 export class VscodeFileHost implements FileHost {
   private excluder: PathExcluder;
+
+  /** Globs from root `.gitignore` files, loaded by {@link loadGitignore}. */
+  private gitignore: string[] = [];
 
   constructor(private config: ApiShadowConfig) {
     this.excluder = this.buildExcluder();
@@ -20,8 +23,17 @@ export class VscodeFileHost implements FileHost {
     this.excluder = this.buildExcluder();
   }
 
+  /** Re-reads `.gitignore` files; returns true when the exclusions changed. */
+  async loadGitignore(): Promise<boolean> {
+    const globs = this.config.respectGitignore ? await gitignoreGlobs() : [];
+    if (globs.join('\n') === this.gitignore.join('\n')) return false;
+    this.gitignore = globs;
+    this.excluder = this.buildExcluder();
+    return true;
+  }
+
   private buildExcluder(): PathExcluder {
-    const extra = [...this.config.exclude, ...(this.config.respectFilesExclude ? filesExcludeGlobs() : [])];
+    const extra = [...this.config.exclude, ...(this.config.respectFilesExclude ? filesExcludeGlobs() : []), ...this.gitignore];
     const tests = this.config.includeTestFiles ? 'include' : this.config.testCoverage ? 'read' : 'exclude';
     return new PathExcluder(defaultExcludeGlobs(tests, extra));
   }
@@ -42,13 +54,14 @@ export class VscodeFileHost implements FileHost {
       if (token?.isCancellationRequested) cts.cancel();
     }, 100);
     try {
-      const [sources, configs, markers] = await Promise.all([
+      const [sources, configs, markers, tsconfigs] = await Promise.all([
         vscode.workspace.findFiles(SOURCE_GLOB, dirExclude, limit, cts.token),
         vscode.workspace.findFiles(CONFIG_GLOB, dirExclude, 1000, cts.token),
         vscode.workspace.findFiles(MARKER_GLOB, dirExclude, 5000, cts.token),
+        vscode.workspace.findFiles(TSCONFIG_GLOB, dirExclude, 1000, cts.token),
       ]);
       const out: string[] = [];
-      for (const uri of [...sources, ...configs]) {
+      for (const uri of [...sources, ...configs, ...tsconfigs]) {
         if (uri.scheme === 'file' && !this.isExcluded(uri)) out.push(uri.fsPath);
       }
       // Project markers are used only to scope prefixes/duplicates; respect exclusion there too.

@@ -5,6 +5,8 @@
 !dist/extension.js.LEGAL.txt
 !resources/icon.png
 !resources/activity.svg
+!resources/webview/dashboard.js
+!resources/webview/dashboard.css
 !README.md
 !CHANGELOG.md
 !LICENSE

@@ -23,4 +23,13 @@ export default tseslint.config(
     files: ['**/*.mjs', '**/*.cjs', '**/*.js'],
     languageOptions: { globals: { process: 'readonly', console: 'readonly', __dirname: 'readonly' } },
   },
+  {
+    // The dashboard webview script runs in the browser sandbox of a VS Code webview.
+    files: ['resources/webview/**/*.js'],
+    languageOptions: {
+      sourceType: 'script',
+      globals: { acquireVsCodeApi: 'readonly', window: 'readonly', document: 'readonly', Node: 'readonly', CSS: 'readonly', setTimeout: 'readonly' },
+    },
+    rules: { eqeqeq: ['error', 'always'], 'no-console': 'error' },
+  },
 );

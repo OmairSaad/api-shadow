@@ -5,7 +5,7 @@
 import { parse, type CstNode, type IToken } from 'java-parser';
 import type { EndpointParameter, HttpMethod, PathExpr, PathPart, ServiceCall } from '../core/types';
 import { compactExpr } from '../core/paths';
-import type { ClientCallFact, JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, Pos } from './facts';
+import type { ClientCallFact, JavaClassFact, JavaFieldFact, JavaFileFacts, JavaMapping, JavaMethodFact, Pos, RiskFact } from './facts';
 import { own, table } from '../core/records';
 
 type CstElement = CstNode | IToken;
@@ -25,6 +25,15 @@ const CONTROLLER_ANNOTATIONS = new Set(['RestController', 'Controller']);
 const SECURITY_CONFIG_ANNOTATIONS = new Set(['EnableWebSecurity', 'EnableWebFluxSecurity']);
 const SECURITY_CONFIG_TYPES = new Set(['SecurityFilterChain', 'SecurityWebFilterChain', 'WebSecurityConfigurerAdapter']);
 const REQUEST_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']);
+const ENTITY_ANNOTATIONS = new Set(['Entity', 'Document', 'Table']);
+const REQUEST_INPUT_ANNOTATIONS = new Set(['RequestParam', 'PathVariable', 'RequestBody', 'RequestHeader', 'CookieValue', 'ModelAttribute']);
+const HTTP_STATUS: Record<string, number> = {
+  OK: 200, CREATED: 201, ACCEPTED: 202, NO_CONTENT: 204, MOVED_PERMANENTLY: 301, FOUND: 302, SEE_OTHER: 303, NOT_MODIFIED: 304,
+  BAD_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404, METHOD_NOT_ALLOWED: 405, CONFLICT: 409, GONE: 410,
+  UNPROCESSABLE_ENTITY: 422, TOO_MANY_REQUESTS: 429, INTERNAL_SERVER_ERROR: 500, NOT_IMPLEMENTED: 501, SERVICE_UNAVAILABLE: 503,
+};
+const SQL_METHODS = new Set(['createQuery', 'createNativeQuery', 'query', 'queryForObject', 'queryForList', 'queryForMap', 'queryForRowSet', 'update', 'execute', 'executeQuery', 'executeUpdate', 'batchUpdate', 'prepareStatement']);
+const FILE_CONSTRUCTORS = new Set(['File', 'FileInputStream', 'FileOutputStream', 'FileSystemResource', 'FileReader', 'FileWriter', 'RandomAccessFile']);
 
 /** Quick textual check used to decide whether a Java file is worth parsing in the first pass. */
 export function isJavaCandidate(source: string): boolean {
@@ -327,8 +336,13 @@ class JavaWalker {
   private classDeclaration(node: CstNode, outer: string[]): void {
     const modifiers = kidNodes(node, 'classModifier');
     const annotations = this.annotationsOf(modifiers);
+    const record = kid(node, 'recordDeclaration');
+    if (record) {
+      this.recordDeclaration(record, annotations, outer);
+      return;
+    }
     const normal = kid(node, 'normalClassDeclaration');
-    if (!normal) return; // enums and records are not treated as controllers
+    if (!normal) return; // enums are not treated as controllers
     const nameTok = directTokens(kid(normal, 'typeIdentifier'), 'Identifier')[0];
     if (!nameTok) return;
     const name = nameTok.image;
@@ -348,6 +362,7 @@ class JavaWalker {
       fields: {},
       methods: [],
     };
+    if (annotations.some((a) => ENTITY_ANNOTATIONS.has(a.name))) cls.isEntity = true;
     this.facts.classes.push(cls);
     if (annotations.some((a) => SECURITY_CONFIG_ANNOTATIONS.has(a.name)) || cls.extends.some((e) => SECURITY_CONFIG_TYPES.has(e))) {
       this.facts.securityConfig ??= { className: name, pos: tokenPos(nameTok) };
@@ -365,6 +380,57 @@ class JavaWalker {
       const nestedIface = kid(member, 'interfaceDeclaration');
       if (nestedIface) this.interfaceDeclaration(nestedIface, [...outer, name]);
     }
+  }
+
+  /** `record UserDto(Long id, String name)`: components are the JSON properties. */
+  private recordDeclaration(node: CstNode, annotations: Annotation[], outer: string[]): void {
+    const nameTok = directTokens(kid(node, 'typeIdentifier'), 'Identifier')[0];
+    if (!nameTok) return;
+    const cls: JavaClassFact = {
+      name: nameTok.image,
+      outer,
+      kind: 'record',
+      pos: tokenPos(nameTok),
+      isController: false,
+      isAbstract: false,
+      security: [],
+      extends: [],
+      implements: [],
+      fields: {},
+      jsonFields: {},
+      methods: [],
+    };
+    if (annotations.some((a) => ENTITY_ANNOTATIONS.has(a.name))) cls.isEntity = true;
+    for (const comp of kidNodes(kid(kid(node, 'recordHeader'), 'recordComponentList'), 'recordComponent')) {
+      const id = directTokens(comp, 'Identifier')[0];
+      const type = this.typeText(kid(comp, 'unannType'));
+      if (!id || !type) continue;
+      cls.fields[id.image] = simpleTypeName(kid(comp, 'unannType')) ?? type;
+      cls.jsonFields![id.image] = this.jsonField(type, this.annotationsOf(kidNodes(comp, 'recordComponentModifier')));
+    }
+    this.facts.classes.push(cls);
+  }
+
+  /** How Jackson serialises a field: `@JsonIgnore`, `@JsonProperty("name")`, write-only access. */
+  private jsonField(type: string, annotations: Annotation[]): JavaFieldFact {
+    const out: JavaFieldFact = { type };
+    for (const a of annotations) {
+      if (a.name === 'JsonIgnore' || a.name === 'Transient') out.ignored = true;
+      if (a.name === 'JsonProperty') {
+        const v = a.values.value;
+        const e = v ? this.evalExpr(v) : undefined;
+        if (e?.parts.length === 1 && 'lit' in e.parts[0] && e.parts[0].lit) out.jsonName = e.parts[0].lit;
+        if (a.values.access && /WRITE_ONLY/.test(this.text(a.values.access))) out.ignored = true;
+      }
+    }
+    return out;
+  }
+
+  /** Source text of a type, whitespace removed: `List<UserDto>`. */
+  private typeText(node: CstNode | undefined): string | undefined {
+    if (!node) return undefined;
+    const text = this.text(node).replace(/\s+/g, '').replace(/@\w+(\([^)]*\))?/g, '');
+    return text.length > 120 ? undefined : text;
   }
 
   private interfaceDeclaration(node: CstNode, outer: string[]): void {
@@ -414,9 +480,13 @@ class JavaWalker {
     }
     if (isStatic) return;
     const type = simpleTypeName(kid(field, 'unannType'));
+    const full = this.typeText(kid(field, 'unannType'));
+    const json = full ? this.jsonField(full, this.annotationsOf(mods)) : undefined;
+    if (json && mods.some((m) => hasToken(m, 'Transient'))) json.ignored = true;
     for (const decl of kidNodes(kid(field, 'variableDeclaratorList'), 'variableDeclarator')) {
       const id = directTokens(kid(decl, 'variableDeclaratorId'), 'Identifier')[0];
       if (id && type) cls.fields[id.image] = type;
+      if (id && json) (cls.jsonFields ??= {})[id.image] = json;
     }
   }
 
@@ -447,12 +517,15 @@ class JavaWalker {
     const params: EndpointParameter[] = [];
     let bodyType: string | undefined;
     let bodyValidated: boolean | undefined;
+    /** Local names holding request input, for the risk scan. */
+    const requestParams: string[] = [];
     for (const fp of kidNodes(kid(declarator, 'formalParameterList'), 'formalParameter')) {
       const regular = kid(fp, 'variableParaRegularParameter') ?? kid(fp, 'variableArityParameter');
       if (!regular) continue;
       const paramAnns = this.annotationsOf(kidNodes(regular, 'variableModifier'));
       const type = simpleTypeName(kid(regular, 'unannType'));
       const paramName = directTokens(kid(regular, 'variableDeclaratorId'), 'Identifier')[0]?.image ?? directTokens(regular, 'Identifier')[0]?.image;
+      if (paramName && paramAnns.some((a) => REQUEST_INPUT_ANNOTATIONS.has(a.name))) requestParams.push(paramName);
       for (const ann of paramAnns) {
         const literal = (key: string): string | undefined => {
           const v = ann.values[key];
@@ -478,16 +551,28 @@ class JavaWalker {
         }
       }
     }
+    const mapping = this.mappingOf(annotations);
     const method: JavaMethodFact = {
       name: nameTok.image,
       pos: mappingAnn ? nodePos(mappingAnn.node) : tokenPos(nameTok),
-      mapping: this.mappingOf(annotations),
+      mapping,
       security: this.securityOf(annotations),
       params,
       bodyType,
       bodyValidated,
       calls: this.calls(kid(node, 'methodBody'), cls),
     };
+    if (mapping || annotations.some((a) => a.name === 'ExceptionHandler')) {
+      const returnType = this.typeText(kid(header, 'result'));
+      if (returnType && returnType !== 'void') method.returnType = returnType;
+      const status = annotations.find((a) => a.name === 'ResponseStatus');
+      const code = status ? (status.values.value ?? status.values.code) : undefined;
+      const statusName = code ? /HttpStatus\.(\w+)/.exec(this.text(code))?.[1] : undefined;
+      if (statusName && HTTP_STATUS[statusName]) method.status = HTTP_STATUS[statusName];
+      const body = kid(node, 'methodBody');
+      const risks = body ? javaRisks(tokensOf(body), new Set(requestParams)) : [];
+      if (risks.length) method.risks = risks;
+    }
     cls.methods.push(method);
   }
 
@@ -583,6 +668,81 @@ function findClientCalls(toks: IToken[], staticImports: Record<string, string>):
       start: tokenPos(start),
       end: { line: end.endLine ?? end.startLine ?? 1, column: (end.endColumn ?? end.startColumn ?? 1) + 1 },
     });
+  }
+  return out;
+}
+
+/** Tokens between the parenthesis at `open` and its match, exclusive. */
+function argTokens(toks: IToken[], open: number): IToken[] {
+  let depth = 0;
+  for (let j = open; j < toks.length; j++) {
+    const type = toks[j].tokenType.name;
+    if (type === 'LBrace') depth++;
+    else if (type === 'RBrace' && --depth === 0) return toks.slice(open + 1, j);
+  }
+  return [];
+}
+
+/**
+ * Request input reaching risky sinks in a Spring handler, from tokens: SQL built with `+`,
+ * `Runtime.exec`, `redirect:` + input, files opened from input, and exception messages or stack
+ * traces returned from catch blocks.
+ */
+function javaRisks(toks: IToken[], tainted: Set<string>): RiskFact[] {
+  const out: RiskFact[] = [];
+  const name = (i: number): string | undefined => (toks[i]?.tokenType.name === 'Identifier' ? toks[i].image : undefined);
+  const is = (i: number, type: string): boolean => toks[i]?.tokenType.name === type;
+  const usesInput = (ts: IToken[]): string | undefined => ts.find((t) => t.tokenType.name === 'Identifier' && tainted.has(t.image))?.image;
+  const add = (rule: RiskFact['rule'], at: IToken, evidence: string, detail?: string): void => {
+    if (out.length < 16 && !out.some((r) => r.rule === rule && r.pos.line === (at.startLine ?? 1))) out.push({ rule, pos: tokenPos(at), evidence, detail });
+  };
+  const catchNames: { name: string; start: number; end: number }[] = [];
+  for (let i = 0; i < toks.length; i++) {
+    const id = name(i);
+    // `catch (SomeException e) { … }`
+    if (is(i, 'Catch') && is(i + 1, 'LBrace')) {
+      const args = argTokens(toks, i + 1);
+      const errName = args.length >= 2 ? args[args.length - 1].image : undefined;
+      let depth = 0;
+      let end = toks.length;
+      for (let j = i + 2 + args.length; j < toks.length; j++) {
+        if (is(j, 'LCurly')) depth++;
+        else if (is(j, 'RCurly') && --depth === 0) {
+          end = j;
+          break;
+        }
+      }
+      if (errName) catchNames.push({ name: errName, start: i, end });
+    }
+    if (!id) continue;
+    if (is(i + 1, 'LBrace')) {
+      const args = argTokens(toks, i + 1);
+      const input = tainted.size ? usesInput(args) : undefined;
+      if (input && SQL_METHODS.has(id) && is(i - 1, 'Dot') && args.some((t) => t.tokenType.name === 'Plus')) add('injection', toks[i], `${name(i - 2) ?? ''}.${id}("…" + ${input})`, 'sql');
+      if (input && id === 'exec' && is(i - 1, 'Dot')) add('injection', toks[i], `exec(${input})`, 'command');
+      if (input && id === 'sendRedirect') add('open-redirect', toks[i], `sendRedirect(${input})`);
+      if (input && (FILE_CONSTRUCTORS.has(id) && is(i - 1, 'New') || ((id === 'get' && name(i - 2) === 'Paths') || (id === 'of' && name(i - 2) === 'Path')))) add('path-traversal', toks[i], `${id}(${input})`);
+      if (id === 'getStackTrace' && name(i - 2) === 'ExceptionUtils') add('error-details', toks[i], 'ExceptionUtils.getStackTrace(…) in a response', 'stack');
+    }
+  }
+  for (let i = 0; i < toks.length; i++) {
+    // `"redirect:" + url`
+    if (is(i, 'StringLiteral') && /^"redirect:/.test(toks[i].image) && is(i + 1, 'Plus') && name(i + 2) && tainted.has(name(i + 2)!)) add('open-redirect', toks[i], `"redirect:" + ${name(i + 2)}`);
+    // `return … e.getMessage() …` inside a catch block.
+    if (is(i, 'Return')) {
+      const c = catchNames.find((x) => x.start < i && i < x.end);
+      if (!c) continue;
+      for (let j = i + 1; j < toks.length && !is(j, 'Semicolon'); j++) {
+        if (name(j) === c.name && is(j + 1, 'Dot') && (name(j + 2) === 'getMessage' || name(j + 2) === 'getLocalizedMessage' || name(j + 2) === 'toString')) {
+          add('error-details', toks[i], `return … ${c.name}.${name(j + 2)}()`, 'message');
+          break;
+        }
+        if (name(j) === c.name && is(j + 1, 'Dot') && name(j + 2) === 'getStackTrace') {
+          add('error-details', toks[i], `return … ${c.name}.getStackTrace()`, 'stack');
+          break;
+        }
+      }
+    }
   }
   return out;
 }

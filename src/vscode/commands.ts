@@ -300,7 +300,7 @@ export function registerCommands(deps: CommandDeps): void {
   });
 }
 
-function endpointOf(target: EndpointTreeNode | Endpoint | undefined): Endpoint | undefined {
+export function endpointOf(target: EndpointTreeNode | Endpoint | undefined): Endpoint | undefined {
   if (!target || typeof target !== 'object') return undefined;
   if ('type' in target) return target.type === 'endpoint' ? target.endpoint : undefined;
   return typeof target.method === 'string' && typeof target.path === 'string' ? target : undefined;
@@ -335,21 +335,21 @@ async function requireResult(controller: AnalysisController): Promise<AnalysisRe
   return controller.current;
 }
 
-function workspaceTitle(): string {
+export function workspaceTitle(): string {
   return vscode.workspace.name?.replace(/\s*\(Workspace\)$/, '') ?? 'Workspace';
 }
 
-async function saveTarget(fileName: string, filters: Record<string, string[]>): Promise<vscode.Uri | undefined> {
+export async function saveTarget(fileName: string, filters: Record<string, string[]>, title = 'Export API Endpoints'): Promise<vscode.Uri | undefined> {
   const folder = vscode.workspace.workspaceFolders?.[0]?.uri;
   return vscode.window.showSaveDialog({
     defaultUri: folder ? vscode.Uri.joinPath(folder, fileName) : undefined,
     filters,
     saveLabel: 'Export',
-    title: 'Export API Endpoints',
+    title,
   });
 }
 
-async function announceExport(uri: vscode.Uri, interactive: boolean): Promise<void> {
+export async function announceExport(uri: vscode.Uri, interactive: boolean): Promise<void> {
   if (!interactive) return;
   const choice = await vscode.window.showInformationMessage(`API Shadow: exported ${path.basename(uri.fsPath)}.`, 'Open');
   if (choice === 'Open') await vscode.window.showTextDocument(uri);

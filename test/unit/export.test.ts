@@ -12,6 +12,7 @@ async function all(): Promise<{ result: AnalysisResult; rel: (f: string) => stri
     endpoints: parts.flatMap((p) => p.result.endpoints),
     issues: parts.flatMap((p) => p.result.issues),
     duplicates: parts.flatMap((p) => p.result.duplicates),
+    security: parts.flatMap((p) => p.result.security),
     servers: parts.flatMap((p) => p.result.servers),
     clientCalls: parts.flatMap((p) => p.result.clientCalls),
     stats: parts[0].result.stats,
@@ -28,14 +29,16 @@ describe('OpenAPI export', async () => {
     await expect(SwaggerParser.validate(JSON.parse(JSON.stringify(doc)))).resolves.toBeTruthy();
   });
 
-  it('converts parameters and request bodies without inventing schemas', () => {
+  it('converts parameters and request bodies without inventing schemas, and marks inferred responses', () => {
     const op = doc.paths['/api/v1/users/{id}'].get;
     expect(op.parameters).toEqual([{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }]);
     const product = doc.paths['/shop/api/v1/products/{id}'].get;
     expect(product.parameters).toEqual([{ name: 'id', in: 'path', required: true, schema: { type: 'integer', format: 'int64' } }]);
     const post = doc.paths['/shop/api/v1/products'].post;
     expect(post.requestBody).toMatchObject({ description: expect.stringContaining('ProductDto'), content: { 'application/json': { schema: {} } } });
-    expect(Object.keys(post.responses)).toEqual(['default']);
+    // The declared return type gives an inferred, clearly marked response; nothing else is added.
+    expect(Object.keys(post.responses)).toEqual(['200', 'default']);
+    expect(post.responses['200']).toMatchObject({ 'x-api-shadow-inferred': true, description: expect.stringContaining('ProductDto'), content: { 'application/json': { schema: { type: 'object', properties: { name: { type: 'string' } } } } } });
     expect(doc.paths['/api/products/{productId}'].get.parameters).toEqual([{ name: 'productId', in: 'path', required: true, schema: { type: 'string', pattern: '\\d+' } }]);
   });
 

@@ -19,6 +19,7 @@ import {
   type Node,
 } from './babelUtils';
 import type {
+  BodyFacts,
   CallableFact,
   ClassFact,
   ClientCallFact,
@@ -33,6 +34,9 @@ import type {
   RouterLib,
 } from './facts';
 import { own, table } from '../core/records';
+import { analyzeBody, handlerParams, looksLikeHandler } from './jsBody';
+import { analyzeConsumers } from './jsConsumers';
+import { corsRisks, exportedTypes } from './jsFileScan';
 
 const EXPRESS_METHODS = table<HttpMethod>({
   get: 'GET',
@@ -79,9 +83,16 @@ const NON_SERVICE_RECEIVERS = new Set(['req', 'res', 'next', 'request', 'respons
 const SERVICE_NAME = /(service|services|repository|repositories|repo|dao|usecase|useCase|provider|manager|gateway|client|store)$/i;
 const SERVICE_SOURCE = /(\/|^)(services?|repositor(y|ies)|daos?|use-?cases?|providers?)(\/|$)|[./-](service|repository|repo|dao)(\.[cm]?[jt]sx?)?$/i;
 
+/** Imports of project modules that usually wrap HTTP calls (`./api`, `@/services/user`, `../hooks/useUser`). */
+const CONSUMER_IMPORT = /(from\s*|require\(\s*)['"](\.|[@~#]\/)[^'"]*(api|service|client|request|http|fetch|quer(y|ies)|hooks?\/use)[^'"]*['"]/i;
+
 /** Quick textual check used to decide whether a file is worth parsing. */
 export function isJsCandidate(source: string): boolean {
-  return /express|fastify|koa|@nestjs\/|Router\s*\(|\.use\s*\(|\.listen\s*\(|\.(get|post|put|patch|delete|all|del)\s*\(\s*['"`/]|\bfetch\s*\(|axios|HttpClient|supertest|\bky\b/.test(source);
+  return (
+    /express|fastify|koa|@nestjs\/|Router\s*\(|\.use\s*\(|\.listen\s*\(|\.(get|post|put|patch|delete|all|del)\s*\(\s*['"`/]|\bfetch\s*\(|axios|HttpClient|supertest|\bky\b/.test(source) ||
+    // Components and hooks that call API service modules: their reads of response fields count.
+    CONSUMER_IMPORT.test(source)
+  );
 }
 
 type Binding =
@@ -144,9 +155,14 @@ class JsAnalyzer {
     nestGlobalGuards: [],
     nestGlobalPipes: [],
     clientCalls: [],
+    consumers: [],
+    risks: [],
+    types: {},
     constants: {},
     issues: [],
   };
+  /** Function nodes of callables, for the consumer analysis. */
+  private readonly callableNodes = new Map<Node, string>();
   private readonly fileScope = new Scope();
   /** Local names bound to the `express` default/namespace import. */
   private readonly expressNames = new Set<string>();
@@ -194,6 +210,13 @@ class JsAnalyzer {
       if (ref) this.facts.exports[pending.name] = ref;
       this.recordConstantExport(pending.name, pending.node, pending.scope);
     }
+    const consumers = analyzeConsumers(program, this.facts, this.callableNodes);
+    for (const [key, returnsBody] of consumers.returns) {
+      const callable = own(this.facts.callables, key);
+      if (callable) callable.returnsBody = returnsBody;
+    }
+    this.facts.risks.push(...corsRisks(program, this.facts.imports));
+    Object.assign(this.facts.types, exportedTypes(program));
     return this.facts;
   }
 
@@ -452,6 +475,10 @@ class JsAnalyzer {
       scope.set(name, { kind: 'const', expr: pathExpr });
       return;
     }
+    if (init.type === 'ObjectExpression' && scope === this.fileScope && !own(this.facts.classes, name) && init.properties.some((p) => p.type === 'ObjectMethod' || (p.type === 'ObjectProperty' && isFunctionLike(unwrap(p.value as Node))))) {
+      this.objectModule(name, init, scope);
+      return;
+    }
     // `const ROUTES = { USERS: '/users', ADMIN: { STATS: '/admin/stats' } }`, optionally frozen.
     for (const [key, value] of this.objectConstants(init, scope)) scope.set(`${name}.${key}`, { kind: 'const', expr: value });
     if (init.type === 'NewExpression' && init.callee.type === 'Identifier') {
@@ -462,6 +489,32 @@ class JsAnalyzer {
     const ref = this.refOf(init, scope);
     scope.set(name, ref ? { kind: 'alias', ref } : { kind: 'shadow' });
     this.walk(init, scope);
+  }
+
+  /**
+   * `const userService = { async getUser(id) { … } }`: methods become callables of a class-like
+   * record, so `userService.getUser()` resolves from other files like a class instance.
+   */
+  private objectModule(name: string, init: t.ObjectExpression, scope: Scope): void {
+    const cls: ClassFact = { name, pos: posOf(init), methods: {}, deps: {} };
+    this.facts.classes[name] = cls;
+    scope.set(name, { kind: 'instance', className: name });
+    for (const [key, value] of this.objectConstants(init, scope)) scope.set(`${name}.${key}`, { kind: 'const', expr: value });
+    for (const prop of init.properties) {
+      if (prop.type === 'SpreadElement') {
+        this.walk(prop.argument, scope);
+        continue;
+      }
+      const key = keyName(prop.key);
+      const fn = prop.type === 'ObjectMethod' ? prop : unwrap(prop.value as Node);
+      if (key && isFunctionLike(fn)) {
+        const fnKey = `${name}.${key}`;
+        this.visitFunction(fn, scope, key, fnKey);
+        cls.methods[key] = fnKey;
+      } else if (prop.type === 'ObjectProperty') {
+        this.walk(prop.value as Node, scope);
+      }
+    }
   }
 
   private addRouter(name: string, kind: 'app' | 'router', node: Node, scope: Scope): string {
@@ -993,7 +1046,9 @@ class JsAnalyzer {
         pos,
         serviceCalls: this.collectServiceCalls(n, scope),
         arity: n.params.length,
+        forwards: forwardedParams(n),
         validatesBody: validatesBody(n) || undefined,
+        body: analyzeBody(n, { ...handlerParams(n), returns: true }),
       };
     }
     if (n.type === 'Identifier') {
@@ -1085,6 +1140,7 @@ class JsAnalyzer {
     if (node.body.type === 'BlockStatement') this.hoist(node.body.body, fnScope);
     this.walk(node.body, fnScope);
     if (key && name) {
+      this.callableNodes.set(node, key);
       const callable: CallableFact = {
         key,
         name,
@@ -1093,8 +1149,17 @@ class JsAnalyzer {
         returns: this.returnedRouter(node, fnScope),
         serviceCalls: this.collectServiceCalls(node, fnScope),
         arity: node.params.length,
+        forwards: forwardedParams(node),
         validatesBody: validatesBody(node) || undefined,
+        body: looksLikeHandler(node)
+          ? analyzeBody(node, { ...handlerParams(node), returns: true })
+          : SERVICE_SOURCE.test(this.filePath) || SERVICE_NAME.test(this.currentClass()?.name ?? '')
+            ? dataAccessOnly(analyzeBody(node, {}))
+            : undefined,
+        owner: this.currentClass()?.name,
       };
+      if (!callable.body) delete callable.body;
+      if (!callable.owner) delete callable.owner;
       this.facts.callables[key] = callable;
     }
   }
@@ -1282,6 +1347,19 @@ class JsAnalyzer {
   // NestJS
   // -------------------------------------------------------------------------------------------
 
+  /** `@HttpCode(204)` / `@HttpCode(HttpStatus.NO_CONTENT)` on a Nest method. */
+  private httpCode(member: t.ClassMethod): number | undefined {
+    for (const dec of member.decorators ?? []) {
+      const d = this.nestDecorator(dec.expression);
+      if (d?.name !== 'HttpCode' || !d.args[0]) continue;
+      const a = unwrap(d.args[0]);
+      if (a.type === 'NumericLiteral') return a.value;
+      const name = a.type === 'MemberExpression' ? propName(a) : undefined;
+      if (name && HTTP_STATUS_NAMES[name]) return HTTP_STATUS_NAMES[name];
+    }
+    return undefined;
+  }
+
   /** Returns the canonical @nestjs/common name for a decorator expression. */
   private nestDecorator(expr: Node): { name: string; args: Node[] } | undefined {
     if (!this.usesNest) return undefined;
@@ -1399,14 +1477,27 @@ class JsAnalyzer {
     const params: NestParamFact[] = [];
     let bodyType: string | undefined;
     let bodyPipes: string[] | undefined;
+    const vars: { body: string[]; param: string[]; query: string[]; req?: string; user: boolean } = { body: [], param: [], query: [], user: false };
     for (const param of member.params) {
       const p = param.type === 'TSParameterProperty' ? param.parameter : param;
       const decs = (p as { decorators?: t.Decorator[] }).decorators ?? [];
       const id = p.type === 'AssignmentPattern' ? p.left : p;
       const type = id.type === 'Identifier' ? typeNameOf(id.typeAnnotation as Node | undefined) : undefined;
+      const local = id.type === 'Identifier' ? id.name : undefined;
       for (const dec of decs) {
         const d = this.nestDecorator(dec.expression);
-        if (!d) continue;
+        if (!d) {
+          // `@CurrentUser() user`, `@AuthUser()`, `@Session()`: the handler knows who is calling.
+          if (/user|auth|principal|session/i.test(shortLabel(dec.expression))) vars.user = true;
+          continue;
+        }
+        if (local) {
+          if (d.name === 'Body') (d.args[0] ? vars.query : vars.body).push(local);
+          else if (d.name === 'Param') vars.param.push(local);
+          else if (d.name === 'Query') vars.query.push(local);
+          else if (d.name === 'Req' || d.name === 'Request') vars.req = local;
+          else if (d.name === 'Session') vars.user = true;
+        }
         const keyArg = d.args[0] && unwrap(d.args[0]).type === 'StringLiteral' ? (unwrap(d.args[0]) as t.StringLiteral).value : undefined;
         const optional = (id.type === 'Identifier' && id.optional) || p.type === 'AssignmentPattern';
         if (d.name === 'Param' && keyArg) params.push({ name: keyArg, in: 'path', required: true, type });
@@ -1432,7 +1523,13 @@ class JsAnalyzer {
       bodyType,
       bodyPipes,
       serviceCalls: callable?.serviceCalls ?? [],
+      httpCode: this.httpCode(member),
+      returnType: responseTypeName(member.returnType as Node | null | undefined),
+      body: analyzeBody(member, { req: vars.req, bodyVars: vars.body, paramVars: vars.param, queryVars: vars.query, receivesUser: vars.user, returns: true }),
     };
+    if (method.httpCode === undefined) delete method.httpCode;
+    if (!method.returnType) delete method.returnType;
+    if (!method.body) delete method.body;
     controller.methods.push(method);
   }
 
@@ -1809,6 +1906,25 @@ const BODY_ACCESS = /(^|\.)(body|payload)$/;
 const SCHEMA_CHECK = /(valid|parse|assert|schema|check|decode|cast)/i;
 
 /** True when the function passes the request body to something that looks like a schema check. */
+/** Indexes of parameters the function calls with no arguments, like `next()`; `next(err)` does not count. */
+function forwardedParams(fn: t.Function): number[] | undefined {
+  const names = new Map<string, number>();
+  fn.params.forEach((p, i) => {
+    if (p.type === 'Identifier') names.set(p.name, i);
+  });
+  if (names.size === 0) return undefined;
+  const found = new Set<number>();
+  const visit = (n: Node): void => {
+    if ((n.type === 'CallExpression' || n.type === 'OptionalCallExpression') && n.callee.type === 'Identifier' && n.arguments.length === 0) {
+      const i = names.get(n.callee.name);
+      if (i !== undefined) found.add(i);
+    }
+    forEachChild(n, visit);
+  };
+  visit(fn.body);
+  return found.size > 0 ? [...found] : undefined;
+}
+
 function validatesBody(fn: t.Function): boolean {
   let found = false;
   const visit = (n: Node): void => {
@@ -1824,4 +1940,24 @@ function validatesBody(fn: t.Function): boolean {
   };
   visit(fn.body);
   return found;
+}
+
+const HTTP_STATUS_NAMES: Record<string, number> = { OK: 200, CREATED: 201, ACCEPTED: 202, NO_CONTENT: 204, MOVED_PERMANENTLY: 301, FOUND: 302, BAD_REQUEST: 400, UNAUTHORIZED: 401, FORBIDDEN: 403, NOT_FOUND: 404, CONFLICT: 409 };
+
+/** The response type of a handler: `Promise<UserDto>` and `Observable<UserDto[]>` unwrap to the inner type. */
+function responseTypeName(annotation: Node | null | undefined): string | undefined {
+  if (!annotation) return undefined;
+  let node: Node = annotation.type === 'TSTypeAnnotation' ? annotation.typeAnnotation : annotation;
+  for (let i = 0; i < 3; i++) {
+    if (node.type !== 'TSTypeReference' || node.typeName.type !== 'Identifier' || !/^(Promise|Observable)$/.test(node.typeName.name)) break;
+    const inner: Node | undefined = node.typeParameters?.params[0];
+    if (!inner) return undefined;
+    node = inner;
+  }
+  return typeNameOf(node);
+}
+
+/** Service functions only contribute their data access calls. */
+function dataAccessOnly(body: BodyFacts | undefined): BodyFacts | undefined {
+  return body?.dataAccess ? { dataAccess: body.dataAccess } : undefined;
 }

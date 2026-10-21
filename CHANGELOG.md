@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0
+
+- **Dashboard** (**API Shadow: Open Dashboard**, or click the status bar): overview, a searchable API explorer with callers, inferred responses and tests, impact analysis, security, dependency graph, contract comparison and test generation in one view.
+- **Change impact**: response shapes are inferred from handlers (literals, statuses, thrown Nest exceptions, Nest DTO types, Spring DTOs, records and Jackson annotations) and response reads are followed through client code (fetch, axios, supertest, React state, react-query, service modules across files). Compared with git HEAD (or a chosen branch, tag or snapshot), removed, renamed and retyped fields, moved routes, new required parameters and changed statuses are reported at the client code that reads them, with risk, evidence and a quick fix for renames.
+- **Reads of missing response fields** are reported where they happen, with *Did you mean …?*.
+- **OpenAPI contract comparison**: working tree vs. a revision, two revisions, two files, or contract vs. implementation, classified as breaking, potentially breaking, non-breaking or informational.
+- **Security Radar**: hardcoded credentials (redacted, never stored), sensitive response fields, missing auth, permissive CORS, mass assignment, object-level authorization, injection, open redirects, path traversal, error details and exposed actuator endpoints, each with severity, confidence, evidence and mitigation. A Security view, Problems-panel entries, dismissals and rule/file exclusions.
+- **Dependency graph** from components to repositories, with search, filters, impact highlighting, keyboard navigation and Mermaid/JSON export.
+- **Test generation**: Jest, Vitest or Mocha with Supertest, and JUnit 5 with MockMvc, previewed and written only after confirmation, never over existing files.
+- **Analysis report** in Markdown with overview, impact, coverage findings (unmatched requests, potentially unused and dynamic routes), security findings and inventory.
+- The OpenAPI export includes responses inferred from code, marked `x-api-shadow-inferred`.
+- Endpoints have a confidence (resolved, relative to an unmounted router, dynamic). Service → repository links for Spring and data access for JS services.
+- `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl`, and the `@/` → `src/` convention, are resolved for imports.
+- The root `.gitignore` of each workspace folder is respected (`apiShadow.respectGitignore`).
+- Fewer false duplicate routes:
+  - Routers whose mount point was not found (mounted in a loop, through `require()` of a computed path, or by an app that wasn't analysed) are no longer compared with each other. Each router's `POST /` used to be reported as a duplicate of every other router's.
+  - `ALL` routes are compared only with other `ALL` routes, so `router.all('*', auth)`, `router.all('/x', mw)` and a `.route('/x')…all(405)` fallback are no longer reported. An `ALL` route that answers requests before a route on the same path is reported as unreachable.
+  - A handler that calls `next()` hands the request on and isn't counted as a second route. `next(err)` doesn't count.
+
 ## 0.3.0
 
 - **Unreachable routes**: routes that can never run because an earlier route on the same router matches every request they would get (`GET /users/:id` before `GET /users/me`, a catch-all before API routes). Covers Express, Koa and NestJS, across mounted routers, with regex constraints. Shown in the sidebar, the CodeLens and the Problems panel, with a link to the route that catches the requests.

@@ -138,6 +138,7 @@ describe('Auth in filters and exports', () => {
         duplicates: [],
         servers: [],
         clientCalls: [],
+        security: [],
         stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false },
       },
       { title: 't', relativePath: (f) => f },

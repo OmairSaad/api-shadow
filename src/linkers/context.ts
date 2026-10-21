@@ -1,11 +1,20 @@
 import * as path from 'path';
-import type { FileFacts, Pos } from '../analyzers/facts';
+import type { BodyFacts, FileFacts, Pos } from '../analyzers/facts';
 import type { AnalysisIssue, Endpoint, SourceLocation } from '../core/types';
 import type { Registration } from '../core/shadowing';
 import { resolveJsFacts } from './jsConstants';
 
 export interface LinkOptions {
   springApplyContextPath: boolean;
+  /** Module path aliases from tsconfig/jsconfig files. */
+  pathAliases?: PathAliasConfig[];
+}
+
+/** One tsconfig/jsconfig: its folder, `baseUrl` and `paths`, with absolute targets. */
+export interface PathAliasConfig {
+  dir: string;
+  baseUrl?: string;
+  paths: { pattern: string; targets: string[] }[];
 }
 
 /**
@@ -56,7 +65,7 @@ export class LinkContext {
     if (f?.lang !== 'js') return f;
     let r = this.resolved.get(file);
     if (!r) {
-      r = resolveJsFacts(file, f, (other) => this.rawFacts(other), this.allFiles);
+      r = resolveJsFacts(file, f, (other) => this.rawFacts(other), (from, spec) => this.resolveModule(from, spec));
       this.resolved.set(file, r);
     }
     return r;
@@ -66,6 +75,11 @@ export class LinkContext {
     const f = this.facts.get(file);
     if (!f && this.allFiles.has(file)) this.requested.add(file);
     return f;
+  }
+
+  /** Resolves a relative import, or an alias from the nearest tsconfig/jsconfig (`@/services/user`). */
+  resolveModule(fromFile: string, specifier: string): string | undefined {
+    return resolveWithAliases(fromFile, specifier, this.allFiles, this.options.pathAliases ?? []);
   }
 
   *files(): IterableIterator<[string, FileFacts]> {
@@ -109,6 +123,39 @@ export function resolveModule(fromFile: string, specifier: string, allFiles: Rea
   return candidates.find((c) => allFiles.has(c));
 }
 
+/**
+ * Resolves `specifier` like {@link resolveModule}, and otherwise through the `paths` and
+ * `baseUrl` of the nearest tsconfig/jsconfig above `fromFile`. Without a matching alias, `@/x`
+ * follows the common convention of meaning `<nearest src folder>/x`. Package imports resolve
+ * to nothing.
+ */
+export function resolveWithAliases(fromFile: string, specifier: string, allFiles: ReadonlySet<string>, aliases: readonly PathAliasConfig[]): string | undefined {
+  if (specifier.startsWith('.') || path.isAbsolute(specifier)) return resolveModule(fromFile, specifier, allFiles);
+  const config = aliases.filter((a) => fromFile.startsWith(a.dir + path.sep)).sort((a, b) => b.dir.length - a.dir.length)[0];
+  if (config) {
+    const base = config.baseUrl ?? config.dir;
+    for (const { pattern, targets } of config.paths) {
+      const star = pattern.indexOf('*');
+      const match = star < 0 ? (specifier === pattern ? '' : undefined) : specifier.startsWith(pattern.slice(0, star)) && specifier.endsWith(pattern.slice(star + 1)) ? specifier.slice(star, specifier.length - (pattern.length - star - 1)) : undefined;
+      if (match === undefined) continue;
+      for (const t of targets) {
+        const found = resolveModule(fromFile, path.resolve(base, t.replace('*', match)), allFiles);
+        if (found) return found;
+      }
+    }
+    if (config.baseUrl) {
+      const found = resolveModule(fromFile, path.resolve(config.baseUrl, specifier), allFiles);
+      if (found) return found;
+    }
+  }
+  if (specifier.startsWith('@/')) {
+    const parts = path.dirname(fromFile).split(path.sep);
+    const src = parts.lastIndexOf('src');
+    if (src >= 0) return resolveModule(fromFile, path.join(parts.slice(0, src + 1).join(path.sep) || path.sep, specifier.slice(2)), allFiles);
+  }
+  return undefined;
+}
+
 /** FNV-1a 32-bit hash, hex encoded. Used for stable endpoint ids. */
 export function hashId(input: string): string {
   let h = 0x811c9dc5;
@@ -121,4 +168,17 @@ export function hashId(input: string): string {
 
 export function endpointId(e: Pick<Endpoint, 'framework' | 'method' | 'path' | 'location'>, extra = ''): string {
   return hashId(`${e.framework}|${e.method}|${e.path}|${e.location.file}|${e.location.line}|${e.location.column}|${extra}`);
+}
+
+/** Responses, risks, data access and ownership evidence of a handler, as endpoint fields. */
+export function bodyFields(body: BodyFacts | undefined, file: string, lib: string): Pick<Endpoint, 'responses' | 'risks' | 'dataAccess' | 'ownership'> {
+  if (!body) return {};
+  const out: Pick<Endpoint, 'responses' | 'risks' | 'dataAccess' | 'ownership'> = {};
+  // Express ignores what a handler returns; Fastify, Koa-style async handlers and Nest send it.
+  const responses = (body.responses ?? []).filter((r) => r.via !== 'return' || lib !== 'express');
+  if (responses.length) out.responses = responses.map((r) => ({ status: r.status, shape: r.shape, via: r.via, location: loc(file, r.pos) }));
+  if (body.risks?.length) out.risks = body.risks.map((r) => ({ rule: r.rule, evidence: r.evidence, detail: r.detail, location: loc(file, r.pos) }));
+  if (body.dataAccess?.length) out.dataAccess = body.dataAccess;
+  if (body.readsUser || body.paramIdToData) out.ownership = { readsUser: !!body.readsUser, paramIdToData: !!body.paramIdToData };
+  return out;
 }
