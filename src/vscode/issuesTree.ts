@@ -8,6 +8,7 @@ export type IssueTreeNode = { type: 'section'; kind: IssueKind; issues: Analysis
 const SECTIONS: { kind: IssueKind; label: string; icon: string }[] = [
   { kind: 'unreachable', label: 'Unreachable routes', icon: 'error' },
   { kind: 'broken-call', label: 'Calls to missing routes', icon: 'debug-disconnect' },
+  { kind: 'response-mismatch', label: 'Reads of missing response fields', icon: 'symbol-field' },
   { kind: 'duplicate', label: 'Potential duplicate routes', icon: 'warning' },
   { kind: 'no-auth', label: 'Endpoints without detected auth', icon: 'unlock' },
   { kind: 'no-validation', label: 'Request bodies without validation', icon: 'circle-slash' },
@@ -43,7 +44,7 @@ export class IssuesTreeProvider implements vscode.TreeDataProvider<IssueTreeNode
     if (node.type === 'section') {
       const meta = SECTIONS.find((s) => s.kind === node.kind)!;
       // Bugs open by default; review lists (auth, validation, uncalled) stay collapsed.
-      const expanded = node.kind === 'duplicate' || node.kind === 'unreachable' || node.kind === 'broken-call' || node.kind === 'parse-error';
+      const expanded = node.kind === 'duplicate' || node.kind === 'unreachable' || node.kind === 'broken-call' || node.kind === 'response-mismatch' || node.kind === 'parse-error';
       const item = new vscode.TreeItem(meta.label, expanded ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `section:${node.kind}`;
       item.description = String(node.issues.length);

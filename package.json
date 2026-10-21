@@ -1,8 +1,8 @@
 {
   "name": "api-shadow",
   "displayName": "API Shadow",
-  "description": "See every API endpoint in Express, Fastify, Koa, NestJS and Spring Boot: unreachable routes, frontend calls, tests, auth, validation and API diffs. Fully local.",
-  "version": "0.3.0",
+  "description": "See every API endpoint in Express, Fastify, Koa, NestJS and Spring Boot, and what calls it: change impact on frontend code, OpenAPI contract diffs, a security radar, a dependency graph and generated tests. Fully local.",
+  "version": "0.4.0",
   "publisher": "OmairSaad",
   "license": "MIT",
   "author": {
@@ -48,7 +48,11 @@
     "koa",
     "breaking changes",
     "fetch",
-    "axios"
+    "axios",
+    "impact analysis",
+    "dependency graph",
+    "test generation",
+    "api contract"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -60,7 +64,7 @@
   "capabilities": {
     "untrustedWorkspaces": {
       "supported": "limited",
-      "description": "API Shadow only reads source files and never executes workspace code. Comparing the API with a git branch runs git, so it needs a trusted workspace."
+      "description": "API Shadow only reads source files and never executes workspace code. Comparing with git revisions (API diff, OpenAPI contract comparison and the git HEAD impact baseline) runs git, so it needs a trusted workspace; impact analysis falls back to the session start otherwise."
     },
     "virtualWorkspaces": {
       "supported": false,
@@ -90,6 +94,13 @@
           "name": "Issues",
           "icon": "resources/activity.svg",
           "contextualTitle": "API Shadow"
+        },
+        {
+          "id": "apiShadow.security",
+          "name": "Security",
+          "icon": "resources/activity.svg",
+          "contextualTitle": "API Shadow",
+          "visibility": "collapsed"
         }
       ]
     },
@@ -112,6 +123,11 @@
       {
         "view": "apiShadow.issues",
         "contents": "No duplicate routes or analysis limitations.",
+        "when": "apiShadow.ready"
+      },
+      {
+        "view": "apiShadow.security",
+        "contents": "No security findings. API Shadow checks for hardcoded credentials, permissive CORS, routes without recognizable auth, mass assignment, injection, open redirects, file paths from request input, exposed error details and sensitive response fields. It cannot prove an API is secure.\n[Open Dashboard](command:apiShadow.showDashboard)",
         "when": "apiShadow.ready"
       }
     ],
@@ -236,10 +252,99 @@
         "title": "Compare API with Branch or Tag…",
         "category": "API Shadow",
         "icon": "$(git-compare)"
+      },
+      {
+        "command": "apiShadow.showDashboard",
+        "title": "Open Dashboard",
+        "category": "API Shadow",
+        "icon": "$(dashboard)"
+      },
+      {
+        "command": "apiShadow.showGraph",
+        "title": "Show Dependency Graph",
+        "category": "API Shadow",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "apiShadow.analyzeImpact",
+        "title": "Analyze Change Impact",
+        "category": "API Shadow",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "apiShadow.setImpactBaseline",
+        "title": "Set Impact Baseline…",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.compareContracts",
+        "title": "Compare API Contracts (OpenAPI)…",
+        "category": "API Shadow",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "apiShadow.generateTests",
+        "title": "Generate API Tests…",
+        "category": "API Shadow",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "apiShadow.runSecurityAnalysis",
+        "title": "Run Security Analysis",
+        "category": "API Shadow",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "apiShadow.exportReport",
+        "title": "Export Analysis Report",
+        "category": "API Shadow",
+        "icon": "$(output)"
+      },
+      {
+        "command": "apiShadow.exportGraph",
+        "title": "Export Dependency Graph…",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.dismissFinding",
+        "title": "Dismiss Finding",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.dismissFindingFromTree",
+        "title": "Dismiss Finding",
+        "category": "API Shadow",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "apiShadow.restoreFinding",
+        "title": "Restore Finding",
+        "category": "API Shadow",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "apiShadow.restoreDismissedFindings",
+        "title": "Restore Dismissed Security Findings",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.disableSecurityRule",
+        "title": "Turn Off Security Rule…",
+        "category": "API Shadow"
+      },
+      {
+        "command": "apiShadow.enableSecurityRule",
+        "title": "Turn On Security Rule",
+        "category": "API Shadow"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "apiShadow.showDashboard",
+          "when": "view == apiShadow.endpoints",
+          "group": "navigation@0"
+        },
         {
           "command": "apiShadow.search",
           "when": "view == apiShadow.endpoints",
@@ -304,6 +409,51 @@
           "command": "apiShadow.refresh",
           "when": "view == apiShadow.issues",
           "group": "navigation@1"
+        },
+        {
+          "command": "apiShadow.analyzeImpact",
+          "when": "view == apiShadow.endpoints",
+          "group": "intel@1"
+        },
+        {
+          "command": "apiShadow.compareContracts",
+          "when": "view == apiShadow.endpoints",
+          "group": "intel@2"
+        },
+        {
+          "command": "apiShadow.generateTests",
+          "when": "view == apiShadow.endpoints",
+          "group": "intel@3"
+        },
+        {
+          "command": "apiShadow.showGraph",
+          "when": "view == apiShadow.endpoints",
+          "group": "intel@4"
+        },
+        {
+          "command": "apiShadow.exportReport",
+          "when": "view == apiShadow.endpoints",
+          "group": "export@0"
+        },
+        {
+          "command": "apiShadow.runSecurityAnalysis",
+          "when": "view == apiShadow.security",
+          "group": "navigation@1"
+        },
+        {
+          "command": "apiShadow.showDashboard",
+          "when": "view == apiShadow.security",
+          "group": "navigation@2"
+        },
+        {
+          "command": "apiShadow.restoreDismissedFindings",
+          "when": "view == apiShadow.security",
+          "group": "more@1"
+        },
+        {
+          "command": "apiShadow.disableSecurityRule",
+          "when": "view == apiShadow.security",
+          "group": "more@2"
         }
       ],
       "view/item/context": [
@@ -356,6 +506,21 @@
           "command": "apiShadow.showCallers",
           "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
           "group": "1_navigation@4"
+        },
+        {
+          "command": "apiShadow.generateTests",
+          "when": "view == apiShadow.endpoints && viewItem == apiShadow.endpoint",
+          "group": "3_generate@1"
+        },
+        {
+          "command": "apiShadow.dismissFindingFromTree",
+          "when": "view == apiShadow.security && viewItem == apiShadow.finding",
+          "group": "inline@1"
+        },
+        {
+          "command": "apiShadow.restoreFinding",
+          "when": "view == apiShadow.security && viewItem == apiShadow.dismissedFinding",
+          "group": "inline@1"
         }
       ],
       "commandPalette": [
@@ -381,6 +546,22 @@
         },
         {
           "command": "apiShadow.endpointActions",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.dismissFinding",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.dismissFindingFromTree",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.restoreFinding",
+          "when": "false"
+        },
+        {
+          "command": "apiShadow.enableSecurityRule",
           "when": "false"
         }
       ]
@@ -602,6 +783,116 @@
           "type": "boolean",
           "default": true,
           "description": "Detect whether request bodies are validated (validation middleware, schema checks, NestJS pipes, @Valid, Fastify schemas) and report unvalidated ones in projects that validate others."
+        },
+        "apiShadow.respectGitignore": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Also skip files matched by the `.gitignore` at the root of each workspace folder. Negated patterns (`!pattern`) and nested `.gitignore` files are not applied."
+        },
+        "apiShadow.responseChecks.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Report client code that reads a response field the endpoint does not return, when the response shape is known (built from literals or a declared DTO type)."
+        },
+        "apiShadow.diagnostics.responseMismatch": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show reads of missing response fields in the Problems panel."
+        },
+        "apiShadow.impact.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Analyze the impact of API changes: compare the current code with a baseline (see `#apiShadow.impact.baseline#`) and find the client code that reads removed, renamed or retyped response fields or calls changed routes."
+        },
+        "apiShadow.impact.baseline": {
+          "type": "string",
+          "enum": [
+            "gitHead",
+            "session"
+          ],
+          "enumDescriptions": [
+            "The last commit (HEAD): the impact of uncommitted changes. Needs git and a trusted workspace; falls back to the session start otherwise.",
+            "The first analysis of this VS Code session."
+          ],
+          "default": "gitHead",
+          "markdownDescription": "What the current code is compared with for change impact. **API Shadow: Set Impact Baseline…** can also choose a branch, tag or the current state."
+        },
+        "apiShadow.diagnostics.impact": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show potential breaking changes at the affected client code and at the changed endpoint in the Problems panel."
+        },
+        "apiShadow.security.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the Security Radar: static checks for API-related risks. Nothing is executed or sent anywhere."
+        },
+        "apiShadow.security.disabledRules": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "hardcoded-secret",
+              "sensitive-response",
+              "missing-auth",
+              "permissive-cors",
+              "mass-assignment",
+              "object-authorization",
+              "injection",
+              "open-redirect",
+              "path-traversal",
+              "error-details",
+              "config-exposure"
+            ]
+          },
+          "default": [],
+          "uniqueItems": true,
+          "description": "Security rules to skip."
+        },
+        "apiShadow.security.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Glob patterns (relative to the workspace folder) of files that get no security findings, e.g. `**/fixtures/**`."
+        },
+        "apiShadow.diagnostics.security": {
+          "type": "string",
+          "enum": [
+            "high",
+            "medium",
+            "low",
+            "off"
+          ],
+          "enumDescriptions": [
+            "High severity only",
+            "Medium and high",
+            "All findings",
+            "None (findings are still listed in the Security view)"
+          ],
+          "default": "high",
+          "description": "Lowest severity of security findings shown in the Problems panel."
+        },
+        "apiShadow.contracts.files": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Extra glob patterns for OpenAPI 3 documents to compare. Files named `openapi.*`, `swagger.*`, `api.*`, `*.openapi.*` and files in `openapi/` or `specs/` folders are found automatically."
+        },
+        "apiShadow.graph.maxEndpoints": {
+          "type": "number",
+          "default": 150,
+          "minimum": 10,
+          "maximum": 5000,
+          "description": "Maximum number of endpoints drawn in the dependency graph (the most connected first). Use the graph's focus search to see others."
+        },
+        "apiShadow.testGeneration.directory": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Folder for generated test files, relative to the project root (e.g. `test/api`). When empty: an existing `test/`, `tests/` or `__tests__/` folder, else `tests/api`; `src/test/java` for Spring."
         }
       }
     }

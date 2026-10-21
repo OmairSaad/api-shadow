@@ -1,3 +1,5 @@
+import type { SecurityFinding } from './security';
+
 /**
  * Shared data model. Everything in `src/core`, `src/analyzers`, `src/linkers` and `src/export`
  * is free of `vscode` imports so it can be unit-tested in plain Node.
@@ -38,6 +40,39 @@ export interface PathExpr {
   parts: PathPart[];
 }
 
+/**
+ * The inferred shape of a JSON value, from object and array literals in handler code. `unknown`
+ * means the value comes from somewhere the analyzer cannot see (a database row, a parameter);
+ * `open` objects may have more properties than listed (spreads, computed keys, later mutation).
+ */
+export type Shape =
+  | { t: 'object'; props: Record<string, ShapeProp>; open?: boolean }
+  | { t: 'array'; items?: Shape }
+  | { t: 'string' | 'number' | 'boolean' | 'null' }
+  | { t: 'unknown'; expr?: string };
+
+export interface ShapeProp {
+  shape: Shape;
+  /** Short text of the value expression (`user.name`), used to recognise renamed fields. */
+  src?: string;
+  /** Missing on some code paths. */
+  optional?: boolean;
+}
+
+/** Identifier of a security rule; see `core/security.ts`. */
+export type SecurityRuleId =
+  | 'hardcoded-secret'
+  | 'sensitive-response'
+  | 'missing-auth'
+  | 'permissive-cors'
+  | 'mass-assignment'
+  | 'object-authorization'
+  | 'injection'
+  | 'open-redirect'
+  | 'path-traversal'
+  | 'error-details'
+  | 'config-exposure';
+
 export interface ServiceCall {
   /** Receiver as written, e.g. `usersService` or `this.usersService`. */
   receiver: string;
@@ -52,7 +87,32 @@ export interface ServiceRef {
   /** Display name, e.g. `UsersService.findAll`. */
   name: string;
   location?: SourceLocation;
+  /** Repositories, DAOs or models this service method uses (Spring fields, JS data access calls). */
+  uses?: ServiceRef[];
 }
+
+/** A response inferred from handler code: literals, local constants and declared DTO types. Never authoritative. */
+export interface EndpointResponse {
+  /** Undefined when the framework default applies. */
+  status?: number;
+  shape?: Shape;
+  /** Where it was inferred from: `res.json(...)`, `return`, a declared type (`UserDto`). */
+  via: 'json' | 'send' | 'body' | 'return' | 'status' | 'throw' | 'type';
+  /** Declared type name, for `type` responses. */
+  type?: string;
+  location: SourceLocation;
+}
+
+/** Evidence for a security rule found in an endpoint's handler. */
+export interface EndpointRisk {
+  rule: SecurityRuleId;
+  evidence: string;
+  detail?: string;
+  location: SourceLocation;
+}
+
+/** How sure the analysis is about an endpoint's method and path. */
+export type Confidence = 'high' | 'medium' | 'low';
 
 export type ParameterLocation = 'path' | 'query' | 'header' | 'cookie';
 
@@ -121,11 +181,26 @@ export interface Endpoint {
   conditions?: string[];
   /** Human-readable analysis notes (where a prefix came from, heuristics applied, ...). */
   notes: string[];
+  /** Responses inferred from handler code; see {@link EndpointResponse}. */
+  responses?: EndpointResponse[];
+  /** Data access calls in the handler (`User.findById`, `userRepository.save`). */
+  dataAccess?: string[];
+  /** Security evidence from the handler body; turned into findings by `core/security.ts`. */
+  risks?: EndpointRisk[];
+  /** The handler reads the authenticated user / passes a path parameter to data access. */
+  ownership?: { readsUser: boolean; paramIdToData: boolean };
+  /** How certain the method and path are: `low` for unresolved expressions, `medium` for unmounted routers. */
+  confidence?: Confidence;
+  /**
+   * Set when the router's mount point was not found: the router the path is relative to. Such
+   * paths are only compared with routes of the same router.
+   */
+  relativeTo?: string;
   /** Directory of the nearest project marker (package.json, pom.xml, build.gradle). Used to scope duplicates. */
   projectRoot: string;
 }
 
-export type IssueKind = 'duplicate' | 'unreachable' | 'broken-call' | 'no-auth' | 'no-validation' | 'uncalled' | 'limitation' | 'parse-error' | 'skipped';
+export type IssueKind = 'duplicate' | 'unreachable' | 'broken-call' | 'response-mismatch' | 'no-auth' | 'no-validation' | 'uncalled' | 'limitation' | 'parse-error' | 'skipped';
 export type IssueSeverity = 'info' | 'warning' | 'error';
 
 export interface AnalysisIssue {
@@ -154,6 +229,30 @@ export interface ClientCall {
   range: { start: SourceLocation; end: SourceLocation };
   /** Endpoints this call most likely reaches (best matches only). */
   endpointIds: string[];
+  /** Function or component making the call. */
+  within?: string;
+  /** Response fields read from this call's result, here or in code that uses the function making it. */
+  reads?: ResponseRead[];
+  /** Code that receives this call's response through a function (`getUser()` in `UserProfile`). */
+  consumers?: ResponseConsumer[];
+}
+
+/** A response field read by client code: `user.name`; array items are `[]` (`items.[].title`). */
+export interface ResponseRead {
+  path: string;
+  location: SourceLocation;
+  /** Function or component reading it. */
+  within?: string;
+  /** Read in another function that receives the response from this call's function. */
+  indirect?: boolean;
+}
+
+export interface ResponseConsumer {
+  /** Function or component, e.g. `UserProfile`. */
+  within?: string;
+  /** The function it calls, e.g. `getUser`. */
+  callee: string;
+  location: SourceLocation;
 }
 
 export interface DuplicateGroup {
@@ -185,6 +284,8 @@ export interface AnalysisResult {
   duplicates: DuplicateGroup[];
   servers: ServerInfo[];
   clientCalls: ClientCall[];
+  /** Security Radar findings; see `core/security.ts`. */
+  security: SecurityFinding[];
   stats: AnalysisStats;
 }
 

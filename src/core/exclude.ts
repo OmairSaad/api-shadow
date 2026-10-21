@@ -30,6 +30,8 @@ export const DEFAULT_EXCLUDED_DIRS = [
 export const SOURCE_GLOB = '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java,kt}';
 export const CONFIG_GLOB = '**/application.{properties,yml,yaml}';
 export const MARKER_GLOB = '**/{package.json,pom.xml,build.gradle,build.gradle.kts}';
+/** TypeScript/JavaScript project configs, read for module path aliases (`@/…`). */
+export const TSCONFIG_GLOB = '**/{tsconfig,jsconfig}.json';
 
 /** Test sources: read for test coverage, but their routes are not endpoints (unless asked). */
 const TEST_SOURCE_PATTERNS = ['**/*.{spec,test}.{js,cjs,mjs,jsx,ts,cts,mts,tsx}', '**/*.e2e-spec.{js,ts}', '**/__tests__/**', '**/src/test/**', '**/test/**/*.{js,cjs,mjs,ts,cts,mts}', '**/tests/**/*.{js,cjs,mjs,ts,cts,mts}'];
@@ -110,4 +112,26 @@ export class PathExcluder {
     const p = relativePath.replace(/\\/g, '/').replace(/^\/+/, '');
     return this.patterns.some((re) => re.test(p));
   }
+}
+
+/** Converts `.gitignore` lines to exclusion globs. Negations are skipped (see `apiShadow.respectGitignore`). */
+export function gitignoreToGlobs(text: string): string[] {
+  const out: string[] = [];
+  const lines = text.split(/\r?\n/).map((l) => l.trim());
+  // Allow-list files (`*` then `!src/`) cannot be expressed without negation: skip their catch-alls.
+  const allowList = lines.some((l) => l.startsWith('!'));
+  for (const line of lines) {
+    if (!line || line.startsWith('#') || line.startsWith('!')) continue;
+    if (allowList && /^\/?\*+(\.\*)?\/?$/.test(line)) continue;
+    let p = line.replace(/\\([#!])/g, '$1');
+    const dirOnly = p.endsWith('/');
+    p = p.replace(/\/+$/, '');
+    if (!p) continue;
+    const anchored = p.startsWith('/') || p.slice(0, -1).includes('/');
+    p = p.replace(/^\//, '');
+    const base = anchored ? p : `**/${p}`;
+    out.push(`${base}/**`);
+    if (!dirOnly) out.push(base);
+  }
+  return out;
 }

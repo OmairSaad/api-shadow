@@ -10,7 +10,7 @@ import * as path from 'path';
 import type { CallableFact, ExpressRouteFact, HandlerFact, JsFileFacts, Pos, RefExpr, RouterLib, RouterNodeFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
 import type { Endpoint, PathExpr, ServiceCall, ServiceRef, SourceLocation } from '../core/types';
-import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
+import { bodyFields, endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
 type Resolved =
@@ -93,7 +93,7 @@ export class ExpressLinker {
           node.fact.pos,
         );
       }
-      this.walk(node, [], [], [], new Set([node.id]), orphan, 0, node.fact.lib ?? 'express', []);
+      this.walk(node, [], [], [], new Set([node.id]), orphan ? node.id : undefined, 0, node.fact.lib ?? 'express', []);
     }
     return this.endpoints;
   }
@@ -118,7 +118,7 @@ export class ExpressLinker {
       }
       if (arg.ref && isRelativeImport(arg.ref) && !r) {
         const spec = importSource(arg.ref);
-        const target = spec ? resolveModule(file, spec, this.ctx.allFiles) : undefined;
+        const target = spec ? this.ctx.resolveModule(file, spec) : undefined;
         if (!target) {
           this.ctx.issue('warning', `Could not resolve module "${spec}" used in ${arg.text}; routes it registers are not shown.`, file, mount.pos);
         } else if (this.ctx.getFacts(target)) {
@@ -166,7 +166,7 @@ export class ExpressLinker {
         return callable?.returns ? this.resolve(callee.file, callable.returns, depth + 1) : undefined;
       }
       case 'import': {
-        const target = resolveModule(file, ref.source, this.ctx.allFiles);
+        const target = this.ctx.resolveModule(file, ref.source);
         if (!target) return undefined;
         return this.resolveExport(target, ref.name, ref.member, depth + 1);
       }
@@ -215,7 +215,7 @@ export class ExpressLinker {
     if (ref) return this.resolve(file, ref, depth + 1);
     if (name !== 'default' && name !== '*cjs') {
       for (const star of facts.starExports) {
-        const target = resolveModule(file, star, this.ctx.allFiles);
+        const target = this.ctx.resolveModule(file, star);
         if (!target) continue;
         const r = this.lookupExport(target, name, depth + 1);
         if (r) return r;
@@ -237,7 +237,8 @@ export class ExpressLinker {
   // Expansion
   // -----------------------------------------------------------------------------------------
 
-  private walk(node: GraphNode, inherited: PathExpr[], middleware: string[], chain: string[], stack: Set<string>, orphan: boolean, depth: number, parentLib: RouterLib, registered: Chain): void {
+  /** `orphanOf` is the unmounted root router the walk started from, if any. */
+  private walk(node: GraphNode, inherited: PathExpr[], middleware: string[], chain: string[], stack: Set<string>, orphanOf: string | undefined, depth: number, parentLib: RouterLib, registered: Chain): void {
     if (depth > MAX_DEPTH) return;
     // Plugin and router parameters take the library of whatever they are attached to.
     const lib = node.fact.kind === 'param' ? parentLib : (node.fact.lib ?? parentLib);
@@ -245,7 +246,7 @@ export class ExpressLinker {
     for (const { file, route } of node.routes) {
       const routeMiddleware = [...middleware, ...this.usesBefore(node, file, route.order, route.paths), ...route.middleware];
       const at: Chain = [...registered, { scope: `${node.id}|${file}`, order: route.order }];
-      for (const p of route.paths) this.emit(file, route, [...prefixes, p], routeMiddleware, chain, orphan, lib, at);
+      for (const p of route.paths) this.emit(file, route, [...prefixes, p], routeMiddleware, chain, orphanOf, lib, at);
     }
     for (const edge of node.edges) {
       const child = this.nodes.get(edge.child);
@@ -264,7 +265,7 @@ export class ExpressLinker {
             : edge.via === 'register'
               ? `Registered as a plugin${joinUrlPaths(exprToDisplay(p)) === '/' ? '' : ` with prefix "${exprToDisplay(p)}"`} (${shortFile(edge.file)}:${edge.pos.line})`
               : `Registered via function call (${shortFile(edge.file)}:${edge.pos.line})`;
-        this.walk(child, [...prefixes, p], mw, [...chain, note], nextStack, orphan, depth + 1, lib, at);
+        this.walk(child, [...prefixes, p], mw, [...chain, note], nextStack, orphanOf, depth + 1, lib, at);
       }
     }
   }
@@ -285,7 +286,7 @@ export class ExpressLinker {
     return out;
   }
 
-  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: string[], orphan: boolean, lib: RouterLib, registered: Chain): void {
+  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: string[], orphanOf: string | undefined, lib: RouterLib, registered: Chain): void {
     const isStatic = exprs.every(isStaticExpr);
     const hasRegex = exprs.some((e) => e.parts.some((p) => 'regex' in p));
     // Regex routes cannot be joined like strings: show the prefix followed by the pattern.
@@ -297,11 +298,14 @@ export class ExpressLinker {
     const location = loc(file, route.pos);
     const notes = [...chain];
     if (!isStatic) notes.push(hasRegex ? 'Route uses a regular expression.' : 'Path contains expressions that could not be resolved statically.');
-    if (orphan) notes.push('Mount point not found: path is relative to its router.');
+    if (orphanOf) notes.push('Mount point not found: path is relative to its router.');
     const handler = route.handler;
     const resolved = handler ? this.resolveHandler(file, handler) : undefined;
     const services = this.services(resolved?.file ?? file, [...(handler?.serviceCalls ?? []), ...(resolved?.callable?.serviceCalls ?? [])]);
     const validated = route.bodySchema ? 'route schema' : handler?.validatesBody || resolved?.callable?.validatesBody ? 'schema check in handler' : undefined;
+    // Inline handlers carry their own body facts; referenced ones come from the resolved function.
+    const body = handler?.body ?? (handler?.arity === undefined ? resolved?.callable?.body : undefined);
+    const bodyFile = handler?.body || handler?.arity !== undefined ? file : (resolved?.file ?? file);
     const endpoint: Endpoint = {
       id: '',
       framework: lib,
@@ -317,7 +321,9 @@ export class ExpressLinker {
       parameters: [],
       validation: validated ? { status: 'validated', via: [validated] } : undefined,
       notes,
+      relativeTo: orphanOf,
       projectRoot: this.ctx.projectRootOf(file),
+      ...bodyFields(body, bodyFile, lib),
     };
     endpoint.id = endpointId(endpoint, chain.join('>'));
     if (this.seen.has(endpoint.id)) return;
@@ -325,7 +331,9 @@ export class ExpressLinker {
     this.endpoints.push(endpoint);
     // Express passes `next` third, Koa second; a handler that takes it may let requests through.
     const arity = handler?.arity ?? resolved?.callable?.arity ?? 0;
-    this.ctx.registrations.set(endpoint.id, { chain: registered, passThrough: arity >= (lib === 'koa' ? 2 : 3) });
+    const nextIndex = lib === 'koa' ? 1 : 2;
+    const forwards = (handler?.arity !== undefined ? handler.forwards : resolved?.callable?.forwards)?.includes(nextIndex);
+    this.ctx.registrations.set(endpoint.id, { chain: registered, passThrough: arity > nextIndex, forwards });
   }
 
   private resolveHandler(file: string, handler: HandlerFact): { file: string; callable?: CallableFact; location?: SourceLocation } | undefined {
@@ -339,6 +347,18 @@ export class ExpressLinker {
     const callable = own(this.js(r.file)?.callables, r.key);
     if (!callable) return undefined;
     return { file: r.file, callable, location: loc(r.file, callable.pos) };
+  }
+
+  /** Data access calls of the function declared at a location (a resolved service method). */
+  private dataAccessAt(location: SourceLocation): ServiceRef[] | undefined {
+    const facts = this.js(location.file);
+    if (!facts) return undefined;
+    for (const c of Object.values(facts.callables)) {
+      if (c.pos.line === location.line && c.pos.column === location.column && c.body?.dataAccess?.length) {
+        return c.body.dataAccess.map((name) => ({ name }));
+      }
+    }
+    return undefined;
   }
 
   private services(file: string, calls: ServiceCall[]): ServiceRef[] {
@@ -373,7 +393,8 @@ export class ExpressLinker {
       const name = `${owner}.${call.method}`;
       if (seen.has(name)) continue;
       seen.add(name);
-      out.push({ name, location });
+      const uses = location ? this.dataAccessAt(location) : undefined;
+      out.push(uses ? { name, location, uses } : { name, location });
     }
     return out;
   }

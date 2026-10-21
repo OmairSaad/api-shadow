@@ -4,10 +4,10 @@
  * controller `version`), `RouterModule.register()` module prefixes and global guards
  * (`app.useGlobalGuards()`, `APP_GUARD` providers).
  */
-import type { JsFileFacts, NestGlobalGuardFact, NestGlobalPrefixFact, NestRouterModuleRoute, NestVersioningFact } from '../analyzers/facts';
+import type { JsFileFacts, NestGlobalGuardFact, NestMethodFact, NestGlobalPrefixFact, NestRouterModuleRoute, NestVersioningFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths, lit } from '../core/paths';
-import type { Endpoint, HttpMethod, PathExpr, ServiceRef, SourceLocation } from '../core/types';
-import { endpointId, LinkContext, loc, resolveModule, shortFile } from './context';
+import type { Endpoint, HttpMethod, PathExpr, ServiceRef, Shape, SourceLocation } from '../core/types';
+import { bodyFields, endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
 interface ProjectConfig {
@@ -137,6 +137,7 @@ export class NestLinker {
                   version: versioning && versioning.type !== 'URI' && versions.length > 0 ? versions.join(', ') : undefined,
                   notes,
                   projectRoot: root,
+                  ...this.bodyOf(file, facts, method),
                 };
                 endpoint.id = endpointId(endpoint, version);
                 endpoints.push(endpoint);
@@ -149,6 +150,54 @@ export class NestLinker {
       }
     }
     return endpoints;
+  }
+
+  /**
+   * Responses of a Nest handler: returned values and thrown HTTP exceptions, with the default
+   * status (201 for POST, 200 otherwise) or `@HttpCode`, plus the declared return type's shape.
+   */
+  private bodyOf(file: string, facts: JsFileFacts, method: NestMethodFact): Partial<Endpoint> {
+    const fields = bodyFields(method.body, file, 'nestjs');
+    const success = method.httpCode ?? (method.method === 'POST' ? 201 : 200);
+    const responses = (fields.responses ?? []).map((r) => (r.via === 'return' && r.status === undefined ? { ...r, status: success } : r));
+    if (method.returnType) {
+      const array = method.returnType.endsWith('[]');
+      const name = method.returnType.replace(/\[\]$/, '');
+      const shape = this.resolveType(file, facts, name, 0);
+      if (shape) {
+        // A declared type describes the success response better than an opaque returned value.
+        const known = responses.filter((r) => r.via !== 'return' || (r.shape && r.shape.t !== 'unknown'));
+        known.push({ status: success, shape: array ? { t: 'array', items: shape } : shape, via: 'type', type: method.returnType, location: loc(file, method.pos) });
+        fields.responses = known;
+        return fields;
+      }
+    }
+    if (responses.length) fields.responses = responses;
+    return fields;
+  }
+
+  /** Shape of a TypeScript type declared in this file or imported from another one. */
+  private resolveType(file: string, facts: JsFileFacts, name: string, depth: number): Shape | undefined {
+    if (depth > 4) return undefined;
+    const local = own(facts.types, name);
+    if (local) return local;
+    const imp = own(facts.imports, name);
+    if (!imp) return undefined;
+    const target = this.ctx.resolveModule(file, imp.source);
+    const tf = target ? this.ctx.getFacts(target) : undefined;
+    if (!target || tf?.lang !== 'js') return undefined;
+    const exported = imp.name === 'default' || imp.name === '*' ? name : imp.name;
+    const direct = own(tf.types, exported);
+    if (direct) return direct;
+    const re = own(tf.exports, exported);
+    if (re?.k === 'import') return this.resolveType(target, { ...tf, imports: { ...tf.imports, [exported]: { source: re.source, name: re.name } } }, exported, depth + 1);
+    for (const star of tf.starExports) {
+      const next = this.ctx.resolveModule(target, star);
+      const nf = next ? this.ctx.getFacts(next) : undefined;
+      const s = nf?.lang === 'js' ? own(nf.types, exported) : undefined;
+      if (s) return s;
+    }
+    return undefined;
   }
 
   private isExcluded(prefix: NestGlobalPrefixFact, routePath: string, method: HttpMethod): boolean {
@@ -182,7 +231,7 @@ export class NestLinker {
     }
     const imp = own(facts.imports, className);
     if (!imp) return undefined;
-    const target = resolveModule(file, imp.source, this.ctx.allFiles);
+    const target = this.ctx.resolveModule(file, imp.source);
     if (!target) return undefined;
     const tf = this.ctx.getFacts(target);
     if (tf?.lang !== 'js') return undefined;
@@ -196,12 +245,12 @@ export class NestLinker {
     // Re-exported through a barrel file.
     const reexport = own(tf.exports, name);
     if (reexport?.k === 'import') {
-      const next = resolveModule(target, reexport.source, this.ctx.allFiles);
+      const next = this.ctx.resolveModule(target, reexport.source);
       const nf = next ? this.ctx.getFacts(next) : undefined;
       if (next && nf?.lang === 'js') return this.findClassMethod(next, { ...nf, imports: { ...nf.imports, [className]: { source: reexport.source, name: reexport.name } } }, className, method);
     }
     for (const star of tf.starExports) {
-      const next = resolveModule(target, star, this.ctx.allFiles);
+      const next = this.ctx.resolveModule(target, star);
       const nf = next ? this.ctx.getFacts(next) : undefined;
       if (next && nf?.lang === 'js' && own(nf.classes, name)) return this.findClassMethod(next, nf, name, method);
     }

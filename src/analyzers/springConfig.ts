@@ -1,7 +1,8 @@
 /**
- * Reads only `server.servlet.context-path`, `spring.mvc.servlet.path` and `server.port` from
- * Spring Boot configuration files. No other value is retained, logged or exported: configuration
- * files frequently contain credentials.
+ * Reads only `server.servlet.context-path`, `spring.mvc.servlet.path`, `server.port` and a few
+ * settings that expose internals (error details, actuator endpoints) from Spring Boot
+ * configuration files. No other value is retained, logged or exported: configuration files
+ * frequently contain credentials.
  */
 import { parse as parseYaml } from 'yaml';
 import type { SpringConfigFacts } from './facts';
@@ -9,6 +10,15 @@ import type { SpringConfigFacts } from './facts';
 const CONTEXT_KEYS = ['server.servlet.context-path', 'server.servlet.contextPath', 'server.context-path'];
 const SERVLET_KEYS = ['spring.mvc.servlet.path', 'spring.mvc.servlet-path'];
 const PORT_KEYS = ['server.port'];
+/** Settings that expose internals, with the values that do, and the risk detail. */
+const EXPOSURE: { key: string; bad: RegExp; detail: string; evidence: string }[] = [
+  { key: 'server.error.include-stacktrace', bad: /^(always|on[-_]?param)$/i, detail: 'stack', evidence: 'server.error.include-stacktrace' },
+  { key: 'server.error.include-exception', bad: /^true$/i, detail: 'exception', evidence: 'server.error.include-exception' },
+  { key: 'server.error.include-message', bad: /^always$/i, detail: 'message', evidence: 'server.error.include-message' },
+  { key: 'management.endpoints.web.exposure.include', bad: /(^|,)\s*\*\s*(,|$)|(^|,)\s*(env|heapdump|configprops|beans|threaddump|loggers|mappings)\s*(,|$)/i, detail: 'actuator', evidence: 'management.endpoints.web.exposure.include' },
+  { key: 'management.endpoint.env.show-values', bad: /^always$/i, detail: 'actuator', evidence: 'management.endpoint.env.show-values' },
+];
+const EXPOSURE_KEYS = EXPOSURE.map((e) => e.key);
 
 export function isSpringConfigFile(filePath: string): boolean {
   return /(^|[\\/])application\.(properties|ya?ml)$/i.test(filePath);
@@ -22,6 +32,12 @@ export function analyzeSpringConfig(source: string, filePath: string): SpringCon
   // Placeholders such as `${PORT:8081}` keep their default.
   const port = /^(?:\$\{[^:}]+:)?(\d{1,5})\}?$/.exec(pick(values, PORT_KEYS) ?? '');
   if (port && Number(port[1]) > 0 && Number(port[1]) < 65536) facts.serverPort = Number(port[1]);
+  for (const e of EXPOSURE) {
+    const v = values.get(e.key)?.trim();
+    if (v && e.bad.test(v.replace(/^["']|["']$/g, ''))) {
+      (facts.risks ??= []).push({ rule: e.detail === 'actuator' ? 'config-exposure' : 'error-details', pos: { line: lineOf(source, e.key), column: 1 }, evidence: `${e.evidence}=${v.replace(/^["']|["']$/g, '')}`, detail: e.detail });
+    }
+  }
   if (facts.contextPath?.includes('${') || facts.servletPath?.includes('${')) {
     facts.issues.push({
       kind: 'limitation',
@@ -34,6 +50,15 @@ export function analyzeSpringConfig(source: string, filePath: string): SpringCon
   return facts;
 }
 
+/** Line of a property key (or of its last segment in YAML). */
+function lineOf(source: string, key: string): number {
+  const lines = source.split(/\r?\n/);
+  const leaf = key.split('.').pop()!;
+  const i = lines.findIndex((l) => l.trim().startsWith(key));
+  const j = i >= 0 ? i : lines.findIndex((l) => new RegExp(`^\\s*${leaf.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&')}\\s*:`).test(l));
+  return (j >= 0 ? j : 0) + 1;
+}
+
 function pick(values: Map<string, string>, keys: string[]): string | undefined {
   for (const key of keys) {
     const v = values.get(key);
@@ -43,7 +68,7 @@ function pick(values: Map<string, string>, keys: string[]): string | undefined {
 }
 
 function readProperties(source: string): Map<string, string> {
-  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS]);
+  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS, ...EXPOSURE_KEYS]);
   const out = new Map<string, string>();
   for (const raw of source.split(/\r?\n/)) {
     const line = raw.trim();
@@ -55,7 +80,7 @@ function readProperties(source: string): Map<string, string> {
 }
 
 function readYaml(source: string, facts: SpringConfigFacts): Map<string, string> {
-  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS]);
+  const wanted = new Set([...CONTEXT_KEYS, ...SERVLET_KEYS, ...PORT_KEYS, ...EXPOSURE_KEYS]);
   const out = new Map<string, string>();
   // Multi-document YAML: only the first (default profile) document is considered.
   const firstDoc = source.split(/^---\s*$/m)[0];
@@ -71,7 +96,7 @@ function readYaml(source: string, facts: SpringConfigFacts): Map<string, string>
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
         visit(v, prefix ? `${prefix}.${k}` : k);
       }
-    } else if (wanted.has(prefix) && (typeof value === 'string' || typeof value === 'number')) {
+    } else if (wanted.has(prefix) && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')) {
       out.set(prefix, String(value));
     }
   };

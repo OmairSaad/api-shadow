@@ -6,8 +6,9 @@ import * as path from 'path';
 import { analyzeJava, isJavaCandidate } from '../analyzers/javaAnalyzer';
 import { analyzeJs, isJsCandidate } from '../analyzers/jsAnalyzer';
 import { analyzeSpringConfig, isSpringConfigFile } from '../analyzers/springConfig';
-import { FACTS_VERSION, type FileFacts } from '../analyzers/facts';
-import { LinkContext, loc } from '../linkers/context';
+import { analyzeTsConfig, isTsConfigFile } from '../analyzers/tsconfig';
+import { FACTS_VERSION, type FileFacts, type JsFileFacts, type RiskFact } from '../analyzers/facts';
+import { LinkContext, loc, type PathAliasConfig } from '../linkers/context';
 import { ExpressLinker } from '../linkers/expressLinker';
 import { NestLinker } from '../linkers/nestLinker';
 import { SpringLinker } from '../linkers/springLinker';
@@ -17,6 +18,10 @@ import { isTestPath } from './exclude';
 import { findUnreachable } from './shadowing';
 import { applyValidation } from './validation';
 import { findDuplicates } from './duplicates';
+import { linkConsumers, type ConsumerInput } from './consumers';
+import { checkResponseReads } from './impact';
+import { analyzeSecurity, type FileRisks, type SecurityOptions } from './security';
+import { scanText, type ScanKind } from './textScan';
 import { compareEndpoints } from '../export/markdown';
 import {
   throwIfCancelled,
@@ -59,6 +64,10 @@ export interface EngineOptions {
   validation?: boolean;
   /** Unreachable route detection. Default true. */
   unreachable?: boolean;
+  /** Security Radar. Default: enabled, all rules. */
+  security?: SecurityOptions;
+  /** Report client reads of fields an endpoint does not return. Default true. */
+  responseChecks?: boolean;
 }
 
 interface CacheEntry {
@@ -66,6 +75,8 @@ interface CacheEntry {
   size: number;
   /** Undefined when the textual pre-filter decided the file is irrelevant. */
   facts?: FileFacts;
+  /** Hardcoded credentials and similar findings from the text scan (redacted). */
+  text?: RiskFact[];
 }
 
 export interface SerializedCache {
@@ -78,12 +89,13 @@ const JS_EXT = /\.(js|cjs|mjs|jsx|ts|cts|mts|tsx)$/i;
 const BATCH = 32;
 const MAX_LINK_ROUNDS = 4;
 
-type Kind = 'js' | 'java' | 'config' | 'kotlin' | 'marker' | 'other';
+type Kind = 'js' | 'java' | 'config' | 'tsconfig' | 'kotlin' | 'marker' | 'other';
 
 function kindOf(file: string): Kind {
   const base = path.basename(file);
   if (MARKERS.has(base)) return 'marker';
   if (isSpringConfigFile(file)) return 'config';
+  if (isTsConfigFile(file)) return 'tsconfig';
   if (JS_EXT.test(file) && !file.endsWith('.d.ts')) return 'js';
   if (file.endsWith('.java')) return 'java';
   if (file.endsWith('.kt')) return 'kotlin';
@@ -184,7 +196,7 @@ export class AnalysisEngine {
     let skipped = 0;
     const relevant = files.filter((f) => {
       const k = kindOf(f);
-      return (k === 'js' && wantsJs) || ((k === 'java' || k === 'config' || k === 'kotlin') && wantsJava);
+      return ((k === 'js' || k === 'tsconfig') && wantsJs) || ((k === 'java' || k === 'config' || k === 'kotlin') && wantsJava);
     });
     for (let i = 0; i < relevant.length; i += BATCH) {
       throwIfCancelled(token);
@@ -196,6 +208,16 @@ export class AnalysisEngine {
         else if (r === 'skipped') skipped++;
       }
       await yieldToEventLoop();
+    }
+
+    // Module path aliases (`@/services/user`) from tsconfig/jsconfig files.
+    const pathAliases: PathAliasConfig[] = [];
+    for (const f of relevant) {
+      const facts = this.cache.get(f)?.facts;
+      if (facts?.lang !== 'tsconfig') continue;
+      const dir = path.dirname(f);
+      const baseUrl = facts.baseUrl !== undefined ? path.resolve(dir, facts.baseUrl) : undefined;
+      pathAliases.push({ dir, baseUrl, paths: Object.entries(facts.paths).map(([pattern, targets]) => ({ pattern, targets })) });
     }
 
     // Link, analysing on demand any files the linkers needed but the pre-filter skipped.
@@ -211,6 +233,7 @@ export class AnalysisEngine {
       }
       ctx = new LinkContext(factMap, allFiles, (f) => this.projectRootOf(f), {
         springApplyContextPath: this.options.springApplyContextPath,
+        pathAliases,
       });
       endpoints = [];
       if (enabled.has('express') || enabled.has('fastify') || enabled.has('koa')) endpoints.push(...new ExpressLinker(ctx).link().filter((e) => enabled.has(e.framework)));
@@ -268,13 +291,33 @@ export class AnalysisEngine {
       });
     }
     if (ctx) issues.push(...ctx.issues);
-    const dup = findDuplicates(endpoints);
+    const dup = findDuplicates(endpoints, ctx?.registrations);
     issues.push(...dup.issues);
     issues.push(...applyAuth(endpoints, this.options.auth ?? DEFAULT_AUTH_OPTIONS, centralSecurity));
     if (this.options.unreachable !== false && ctx) issues.push(...findUnreachable(endpoints, ctx.registrations));
     issues.push(...applyValidation(endpoints, this.options.validation !== false));
+    for (const e of endpoints) e.confidence = !e.pathIsStatic ? 'low' : e.relativeTo ? 'medium' : 'high';
     const calls = matchClientCalls(callInputs, endpoints, clientCalls);
     issues.push(...calls.issues);
+    if (clientCalls.enabled) {
+      // Reads are followed through every JS file, tests included, so service functions resolve.
+      const jsFacts = new Map<string, JsFileFacts>();
+      for (const f of relevant) {
+        const facts = this.cache.get(f)?.facts;
+        if (facts?.lang === 'js') jsFacts.set(f, facts);
+      }
+      const resolver = new ExpressLinker(new LinkContext(jsFacts, allFiles, (f) => this.projectRootOf(f), { springApplyContextPath: this.options.springApplyContextPath, pathAliases }));
+      linkConsumers(callInputs as ConsumerInput[], calls.calls, jsFacts, resolver);
+      if (this.options.responseChecks !== false) issues.push(...checkResponseReads(endpoints, calls.calls));
+    }
+    const fileRisks: FileRisks[] = [];
+    for (const f of relevant) {
+      const entry = this.cache.get(f);
+      const facts = entry?.facts;
+      const risks = [...(entry?.text ?? []), ...(facts && 'risks' in facts && Array.isArray(facts.risks) ? facts.risks : [])];
+      if (risks.length) fileRisks.push({ file: f, risks, test: this.isTestFile(f) });
+    }
+    const security = analyzeSecurity(endpoints, issues, fileRisks, this.options.security ?? { enabled: true, disabledRules: [] });
     endpoints.sort(compareEndpoints);
     const durationMs = Date.now() - started;
     this.logger.info(`Analysis finished in ${durationMs} ms: ${endpoints.length} endpoint(s), ${analyzed} file(s) parsed, ${fromCache} from cache.`);
@@ -284,6 +327,7 @@ export class AnalysisEngine {
       duplicates: dup.groups,
       servers: [...servers.values()].sort((a, b) => a.projectRoot.localeCompare(b.projectRoot)),
       clientCalls: calls.calls,
+      security,
       stats: { filesDiscovered: files.length, filesAnalyzed: analyzed, filesFromCache: fromCache, filesSkipped: skipped, durationMs, truncated },
     };
   }
@@ -324,7 +368,10 @@ export class AnalysisEngine {
       return 'skipped';
     }
     const facts = this.analyzeSource(file, source, force);
-    this.cache.set(file, { mtime: stat.mtime, size: stat.size, facts });
+    const kind = kindOf(file);
+    const scanKind: ScanKind | undefined = kind === 'js' ? 'js' : kind === 'java' ? 'java' : kind === 'config' ? 'config' : undefined;
+    const text = scanKind ? scanText(source, scanKind) : [];
+    this.cache.set(file, text.length ? { mtime: stat.mtime, size: stat.size, facts, text } : { mtime: stat.mtime, size: stat.size, facts });
     return facts ? 'analyzed' : 'prefiltered';
   }
 
@@ -338,6 +385,8 @@ export class AnalysisEngine {
           return force || isJavaCandidate(source) ? analyzeJava(source, file) : undefined;
         case 'config':
           return analyzeSpringConfig(source, file);
+        case 'tsconfig':
+          return analyzeTsConfig(source);
         case 'kotlin':
           return /@(RestController|Controller|(Get|Post|Put|Patch|Delete|Request)Mapping)\b/.test(source) ? { lang: 'none', issues: [] } : undefined;
         default:
@@ -348,6 +397,41 @@ export class AnalysisEngine {
       this.logger.error(`Analyzer failed on ${file}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`);
       return { lang: 'none', issues: [{ kind: 'parse-error', severity: 'error', message: 'Internal analyzer error; see the API Shadow log.' }] };
     }
+  }
+
+  /**
+   * Modules that export an app or router created with `express()`, `fastify()` or `new Koa()`,
+   * for generated tests. `listens` is true when the module also calls `listen()` on import.
+   */
+  appModules(): { file: string; exportName: string; lib: 'express' | 'fastify' | 'koa'; listens: boolean }[] {
+    const out: { file: string; exportName: string; lib: 'express' | 'fastify' | 'koa'; listens: boolean }[] = [];
+    for (const [file, entry] of this.cache) {
+      const facts = entry.facts;
+      if (facts?.lang !== 'js' || this.isTestFile(file)) continue;
+      for (const r of facts.routers) {
+        if (r.kind !== 'app') continue;
+        const exported = Object.entries(facts.exports).find(([, ref]) => ref.k === 'node' && ref.key === r.key);
+        if (exported) out.push({ file, exportName: exported[0], lib: r.lib ?? 'express', listens: !!facts.listenPort });
+      }
+    }
+    // Modules that do not start a server on import are easier to test.
+    return out.sort((a, b) => Number(a.listens) - Number(b.listens) || a.file.length - b.file.length);
+  }
+
+  /** Package and fields of a Java class, for generated MockMvc tests. */
+  javaClass(file: string, name: string): { packageName: string; fields: Record<string, string> } | undefined {
+    const facts = this.cache.get(file)?.facts;
+    if (facts?.lang !== 'java') return undefined;
+    const cls = facts.classes.find((c) => c.name === name);
+    return cls ? { packageName: facts.packageName, fields: { ...cls.fields } } : undefined;
+  }
+
+  /** Whether any analysed Java file configures Spring Security under a project root. */
+  hasSpringSecurity(root: string): boolean {
+    for (const [file, entry] of this.cache) {
+      if (entry.facts?.lang === 'java' && entry.facts.securityConfig && file.startsWith(root)) return true;
+    }
+    return false;
   }
 
   /** Test files by their path inside the workspace folder (so a folder named `test` above it doesn't count). */

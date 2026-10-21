@@ -62,9 +62,9 @@ describe('findDuplicates', () => {
     expect(groups).toHaveLength(1);
     expect(issues[0].message).toMatch(/GET \/u\/\{\} declared 2 times/);
   });
-  it('treats ALL as overlapping specific methods', () => {
-    const { groups } = findDuplicates([ep('ALL', '/x'), ep('POST', '/x', { location: { file: '/p/b.js', line: 2, column: 1 } })]);
-    expect(groups).toHaveLength(1);
+  it('compares ALL only with ALL', () => {
+    expect(findDuplicates([ep('ALL', '/x'), ep('POST', '/x', { location: { file: '/p/b.js', line: 2, column: 1 } })]).groups).toEqual([]);
+    expect(findDuplicates([ep('ALL', '/x'), ep('ALL', '/x', { location: { file: '/p/b.js', line: 2, column: 1 } })]).groups).toHaveLength(1);
   });
   it('ignores different methods, projects and frameworks', () => {
     expect(findDuplicates([ep('GET', '/x'), ep('POST', '/x', { location: { file: '/p/b.js', line: 2, column: 1 } })]).groups).toEqual([]);

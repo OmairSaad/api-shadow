@@ -5,7 +5,7 @@
  */
 import type { JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, SpringConfigFacts } from '../analyzers/facts';
 import { compactExpr, exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
-import type { Endpoint, PathExpr, PathPart, ServiceRef, SourceLocation } from '../core/types';
+import type { Endpoint, EndpointResponse, EndpointRisk, PathExpr, PathPart, ServiceRef, Shape, ShapeProp, SourceLocation } from '../core/types';
 import { endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
@@ -17,6 +17,13 @@ interface ClassEntry {
 }
 
 const SERVICE_LIKE = /(Service|Repository|Repo|Dao|Client|Gateway|Facade|Manager|UseCase|Handler|Provider|Port|Adapter)$/;
+const DATA_LIKE = /(Repository|Repo|Dao|Mapper|Template|Store)$/;
+/** Wrappers whose type argument is the response body. */
+const BODY_WRAPPERS = new Set(['ResponseEntity', 'HttpEntity', 'Mono', 'Optional', 'CompletableFuture', 'CompletionStage', 'Callable', 'DeferredResult', 'WebAsyncTask', 'EntityModel']);
+const ARRAY_TYPES = new Set(['List', 'Set', 'Collection', 'Iterable', 'Flux', 'ArrayList', 'LinkedList', 'HashSet', 'SortedSet', 'Stream', 'CollectionModel']);
+const NUMBER_TYPES = new Set(['int', 'long', 'short', 'byte', 'double', 'float', 'Integer', 'Long', 'Short', 'Byte', 'Double', 'Float', 'BigDecimal', 'BigInteger', 'Number', 'AtomicInteger', 'AtomicLong']);
+const STRING_TYPES = new Set(['String', 'char', 'Character', 'UUID', 'LocalDate', 'LocalDateTime', 'LocalTime', 'OffsetDateTime', 'ZonedDateTime', 'Instant', 'Date', 'URI', 'URL', 'Duration', 'CharSequence']);
+const MAX_SHAPE_DEPTH = 4;
 
 export class SpringLinker {
   private readonly bySimple = new Map<string, ClassEntry[]>();
@@ -219,6 +226,7 @@ export class SpringLinker {
               conditions: conditions.length ? conditions : undefined,
               notes,
               projectRoot: this.ctx.projectRootOf(entry.file),
+              ...this.bodyOf(implMethod, implFile === entry.file ? entry : owner, method),
             };
             endpoint.id = endpointId(endpoint, entry.fqn);
             endpoints.push(endpoint);
@@ -229,19 +237,111 @@ export class SpringLinker {
     return endpoints;
   }
 
-  private services(method: JavaMethodFact, entry: ClassEntry): ServiceRef[] {
+  private services(method: JavaMethodFact, entry: ClassEntry, depth = 0): ServiceRef[] {
     const out: ServiceRef[] = [];
     for (const call of method.calls) {
       if (!call.type) continue;
       const target = this.findClass(call.type, entry.facts);
       if (!target && !SERVICE_LIKE.test(call.type)) continue;
       let location: SourceLocation | undefined;
+      let uses: ServiceRef[] | undefined;
       if (target) {
         const m = target.cls.methods.find((x) => x.name === call.method);
         location = loc(target.file, m?.pos ?? target.cls.pos);
+        // Service → repository: calls this service method makes on data-access fields.
+        if (m && depth === 0 && !DATA_LIKE.test(call.type)) {
+          const data = this.services(m, target, depth + 1).filter((r) => DATA_LIKE.test(r.name.split('.')[0]));
+          if (data.length) uses = data;
+        }
       }
-      out.push({ name: `${call.type}.${call.method}`, location });
+      out.push(uses ? { name: `${call.type}.${call.method}`, location, uses } : { name: `${call.type}.${call.method}`, location });
     }
     return out;
   }
+
+  /** Responses from the declared return type and `@ResponseStatus`, risks, and entity request bodies. */
+  private bodyOf(impl: JavaMethodFact, entry: ClassEntry, declared: JavaMethodFact): Partial<Endpoint> {
+    const out: Partial<Endpoint> = {};
+    const returnType = impl.returnType ?? declared.returnType;
+    const status = impl.status ?? declared.status;
+    const location = loc(entry.file, impl.pos);
+    if (returnType) {
+      const shape = this.typeShape(returnType, entry, 0, new Set());
+      const response: EndpointResponse = { status: status ?? 200, via: 'type', type: returnType, location };
+      if (shape) response.shape = shape;
+      out.responses = [response];
+    } else if (status) {
+      out.responses = [{ status, via: 'status', location }];
+    }
+    const risks: EndpointRisk[] = (impl.risks ?? declared.risks ?? []).map((r) => ({ rule: r.rule, evidence: r.evidence, detail: r.detail, location: loc(entry.file, r.pos) }));
+    const bodyType = declared.bodyType ?? impl.bodyType;
+    const bodyClass = bodyType ? this.findClass(bodyType.replace(/<.*$/, ''), entry.facts) : undefined;
+    if (bodyClass?.cls.isEntity) risks.push({ rule: 'mass-assignment', evidence: `@RequestBody ${bodyType} is a persistence entity`, detail: 'entity', location });
+    if (risks.length) out.risks = risks;
+    return out;
+  }
+
+  /** Shape of a Java type as Jackson would write it, through DTO classes and records. */
+  private typeShape(type: string, entry: ClassEntry, depth: number, seen: Set<string>): Shape | undefined {
+    const t = type.replace(/\s+/g, '').replace(/^(final|@\w+)/, '');
+    if (t.endsWith('[]')) return { t: 'array', items: this.typeShape(t.slice(0, -2), entry, depth + 1, seen) };
+    const m = /^([\w.]+)(?:<(.*)>)?$/.exec(t);
+    if (!m) return undefined;
+    const name = m[1].split('.').pop()!;
+    const args = m[2] ? splitTypeArgs(m[2]) : [];
+    if (BODY_WRAPPERS.has(name)) return args[0] && args[0] !== '?' ? this.typeShape(args[0], entry, depth, seen) : undefined;
+    if (ARRAY_TYPES.has(name)) return { t: 'array', items: args[0] ? this.typeShape(args[0], entry, depth + 1, seen) : undefined };
+    if (name === 'Page' || name === 'Slice') return { t: 'object', props: Object.assign(Object.create(null), { content: { shape: { t: 'array', items: args[0] ? this.typeShape(args[0], entry, depth + 1, seen) : undefined } } }), open: true };
+    if (name === 'Map' || name === 'HashMap' || name === 'JsonNode' || name === 'ObjectNode' || name === 'Object') return { t: 'object', props: Object.create(null), open: true };
+    if (NUMBER_TYPES.has(name)) return { t: 'number' };
+    if (STRING_TYPES.has(name)) return { t: 'string' };
+    if (name === 'boolean' || name === 'Boolean') return { t: 'boolean' };
+    if (name === 'void' || name === 'Void') return undefined;
+    if (depth > MAX_SHAPE_DEPTH || seen.has(name)) return { t: 'unknown', expr: name };
+    const cls = this.findClass(name, entry.facts);
+    if (!cls || (!cls.cls.jsonFields && cls.cls.kind !== 'record')) return { t: 'unknown', expr: name };
+    const nextSeen = new Set(seen).add(name);
+    const props: Record<string, ShapeProp> = Object.create(null) as Record<string, ShapeProp>;
+    // Fields of superclasses come first, as Jackson writes them.
+    for (const parentName of cls.cls.extends) {
+      const parent = this.typeShape(parentName, cls, depth + 1, nextSeen);
+      if (parent?.t === 'object') Object.assign(props, parent.props);
+    }
+    for (const [field, f] of Object.entries(cls.cls.jsonFields ?? {})) {
+      if (f.ignored) continue;
+      props[f.jsonName ?? field] = { shape: this.typeShape(f.type, cls, depth + 1, nextSeen) ?? { t: 'unknown', expr: f.type }, src: field };
+    }
+    // Getters without a field are serialised too (`getFullName()`).
+    let open = false;
+    for (const method of cls.cls.methods) {
+      const g = /^(get|is)([A-Z]\w*)$/.exec(method.name);
+      if (!g || method.name === 'getClass' || method.params.length > 0) continue;
+      const prop = g[2][0].toLowerCase() + g[2].slice(1);
+      if (!Object.prototype.hasOwnProperty.call(props, prop) && !Object.prototype.hasOwnProperty.call(cls.cls.jsonFields ?? {}, prop)) {
+        props[prop] = { shape: { t: 'unknown' }, src: `${method.name}()` };
+        open = true;
+      }
+    }
+    const shape: Shape = { t: 'object', props };
+    if (open) shape.open = true;
+    return shape;
+  }
+}
+
+/** Splits `A, Map<B, C>` at top-level commas. */
+function splitTypeArgs(text: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '<') depth++;
+    else if (c === '>') depth--;
+    else if (c === ',' && depth === 0) {
+      out.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  out.push(text.slice(start));
+  return out.map((x) => x.trim()).filter(Boolean);
 }

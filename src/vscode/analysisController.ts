@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { AnalysisEngine, type EngineOptions } from '../core/engine';
-import { CONFIG_GLOB, MARKER_GLOB, SOURCE_GLOB } from '../core/exclude';
+import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, TSCONFIG_GLOB } from '../core/exclude';
 import { CancelledError, type AnalysisResult } from '../core/types';
 import { readConfig, type ApiShadowConfig } from './config';
 import { VscodeFileHost } from './host';
@@ -83,12 +83,31 @@ export class AnalysisController implements vscode.Disposable {
       clientCalls: { enabled: this.config.clientCalls, reportUncalled: this.config.reportUncalled },
       validation: this.config.validation,
       unreachable: this.config.unreachable,
+      responseChecks: this.config.responseChecks,
+      security: {
+        enabled: this.config.security.enabled,
+        disabledRules: this.config.security.disabledRules,
+        isExcluded: securityExcluder(this.config.security.exclude),
+      },
       workspaceRoots: (vscode.workspace.workspaceFolders ?? []).map((f) => f.uri.fsPath),
     };
   }
 
+  /** Modules exporting an app, for test generation. */
+  appModules(): ReturnType<AnalysisEngine['appModules']> {
+    return this.engine.appModules();
+  }
+
+  javaClass(file: string, name: string): ReturnType<AnalysisEngine['javaClass']> {
+    return this.engine.javaClass(file, name);
+  }
+
+  hasSpringSecurity(root: string): boolean {
+    return this.engine.hasSpringSecurity(root);
+  }
+
   private setupWatchers(): void {
-    for (const glob of [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB]) {
+    for (const glob of [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB, TSCONFIG_GLOB]) {
       const watcher = vscode.workspace.createFileSystemWatcher(glob);
       const isMarker = glob === MARKER_GLOB;
       watcher.onDidChange((uri) => this.onFileEvent(uri, 'change', isMarker));
@@ -147,10 +166,11 @@ export class AnalysisController implements vscode.Disposable {
   private async runOnce(cts: vscode.CancellationTokenSource, full: boolean): Promise<void> {
     if (cts.token.isCancellationRequested) return;
     if (!vscode.workspace.workspaceFolders?.length) {
-      this.publish({ endpoints: [], issues: [], duplicates: [], servers: [], clientCalls: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
+      this.publish({ endpoints: [], issues: [], duplicates: [], servers: [], clientCalls: [], security: [], stats: { filesDiscovered: 0, filesAnalyzed: 0, filesFromCache: 0, filesSkipped: 0, durationMs: 0, truncated: false } });
       return;
     }
     await this.loadPersistedCache();
+    if (await this.host.loadGitignore()) this.engine.markStructureChanged();
     this.setAnalyzing(true);
     try {
       const result = await vscode.window.withProgress(
@@ -242,4 +262,11 @@ export class AnalysisController implements vscode.Disposable {
     this.stateEmitter.dispose();
     for (const d of this.disposables) d.dispose();
   }
+}
+
+/** Files matching `apiShadow.security.exclude` (relative to their workspace folder) get no findings. */
+function securityExcluder(globs: string[]): ((file: string) => boolean) | undefined {
+  if (globs.length === 0) return undefined;
+  const excluder = new PathExcluder(globs);
+  return (file) => excluder.isExcluded(vscode.workspace.asRelativePath(vscode.Uri.file(file), false));
 }

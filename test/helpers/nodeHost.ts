@@ -1,14 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AnalysisEngine, type EngineOptions, type FileHost } from '../../src/core/engine';
-import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, defaultExcludeGlobs, globToRegExp } from '../../src/core/exclude';
+import { CONFIG_GLOB, MARKER_GLOB, PathExcluder, SOURCE_GLOB, TSCONFIG_GLOB, defaultExcludeGlobs, globToRegExp } from '../../src/core/exclude';
 import { FRAMEWORKS, type Framework } from '../../src/core/types';
 
 /** File host backed by the real file system; mirrors what the VS Code host does with findFiles. */
 export class NodeFileHost implements FileHost {
   readonly reads: string[] = [];
   private readonly excluder: PathExcluder;
-  private readonly includes = [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB].map(globToRegExp);
+  private readonly includes = [SOURCE_GLOB, CONFIG_GLOB, MARKER_GLOB, TSCONFIG_GLOB].map(globToRegExp);
 
   constructor(
     private readonly root: string,

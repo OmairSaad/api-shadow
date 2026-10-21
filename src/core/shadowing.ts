@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { normalizeForComparison } from './paths';
 import { parseRoute, shadows } from './routeMatch';
 import type { AnalysisIssue, Endpoint } from './types';
 
@@ -11,6 +12,8 @@ export interface Registration {
   chain: { scope: string; order: number }[];
   /** The handler may call `next()`, so later routes can still be reached. */
   passThrough: boolean;
+  /** The handler calls `next()`, so it hands requests on rather than answering them. */
+  forwards?: boolean;
 }
 
 /** Frameworks that try routes in registration order and stop at the first match. */
@@ -41,7 +44,10 @@ export function findUnreachable(endpoints: Endpoint[], registrations: ReadonlyMa
         const ra = registrations.get(earlier.id)!;
         if (ra.passThrough || !registeredBefore(ra, rb)) return false;
         const a = parsed.get(earlier.id);
-        return !!a && shadows(a, b, later.framework);
+        if (!a) return false;
+        // Identical routes of one method are duplicates; an identical ALL route is reported here.
+        const sameAll = earlier.method === 'ALL' && later.method !== 'ALL' && normalizeForComparison(earlier.path, earlier.framework) === normalizeForComparison(later.path, later.framework);
+        return sameAll || shadows(a, b, later.framework);
       });
       if (!blocker) continue;
       const where = `${path.basename(blocker.location.file)}:${blocker.location.line}`;

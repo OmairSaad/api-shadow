@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import type { ImpactReport } from './core/impact';
 import type { AnalysisResult } from './core/types';
 import { GROUP_BY_VALUES, type GroupBy } from './core/view';
 import { AnalysisController } from './vscode/analysisController';
@@ -11,6 +12,12 @@ import { EndpointSymbols } from './vscode/symbols';
 import { EndpointTreeProvider, type EndpointTreeNode } from './vscode/endpointTree';
 import { IssuesTreeProvider } from './vscode/issuesTree';
 import { ChannelLogger } from './vscode/logger';
+import { ApiShadowCodeActions } from './vscode/codeActions';
+import { Dashboard } from './vscode/dashboard';
+import { Dismissals } from './vscode/dismissals';
+import { ImpactController } from './vscode/impactController';
+import { IntelState, registerIntelCommands } from './vscode/intelCommands';
+import { SecurityTreeProvider } from './vscode/securityTree';
 
 /** Public API returned from `activate`, used by the integration tests and available to other extensions. */
 export interface ApiShadowApi {
@@ -21,6 +28,8 @@ export interface ApiShadowApi {
   /** Root (and child) nodes of the Endpoints view as currently filtered/grouped. */
   getTreeChildren(node?: EndpointTreeNode): EndpointTreeNode[];
   getTreeItem(node: EndpointTreeNode): vscode.TreeItem;
+  /** The current change impact report, once a baseline is available. */
+  getImpactReport(): ImpactReport | undefined;
 }
 
 export function activate(context: vscode.ExtensionContext): ApiShadowApi {
@@ -39,12 +48,17 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
   const sourceFiles: vscode.DocumentSelector = { scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java}' };
   const codeLens = new EndpointCodeLensProvider(() => controller.settings.codeLens);
 
+  const dismissals = new Dismissals(context.workspaceState);
+  const impact = new ImpactController(controller, context, logger);
+  const security = new SecurityTreeProvider(dismissals);
+  const intel = new IntelState(controller);
   const endpointsView = vscode.window.createTreeView('apiShadow.endpoints', { treeDataProvider: tree, showCollapseAll: true });
   const issuesView = vscode.window.createTreeView('apiShadow.issues', { treeDataProvider: issues, showCollapseAll: true });
+  const securityView = vscode.window.createTreeView('apiShadow.security', { treeDataProvider: security, showCollapseAll: true });
 
   const status = vscode.window.createStatusBarItem('apiShadow.status', vscode.StatusBarAlignment.Left, 50);
   status.name = 'API Shadow';
-  status.command = 'apiShadow.endpoints.focus';
+  status.command = 'apiShadow.showDashboard';
 
   const updateViewState = (): void => {
     const total = tree.allEndpoints().length;
@@ -58,6 +72,8 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     endpointsView.message = filtered ? (visible === 0 ? `No endpoints match: ${parts.join('; ')}.` : `Filtered by ${parts.join('; ')}.`) : undefined;
     const issueCount = issues.count();
     issuesView.description = issueCount > 0 ? `${issueCount}` : undefined;
+    const findings = security.count();
+    securityView.description = findings > 0 ? `${findings}` : undefined;
   };
 
   const updateStatus = (): void => {
@@ -74,14 +90,28 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
       const count = (kind: string): number => result?.issues.filter((i) => i.kind === kind).length ?? 0;
       const dups = result?.duplicates.length ?? 0;
       const noAuth = count('no-auth');
-      const problems = dups + count('unreachable') + count('broken-call') + count('no-validation');
-      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${problems ? ` $(warning) ${problems}` : ''}${noAuth ? ` $(unlock) ${noAuth}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
+      const problems = dups + count('unreachable') + count('broken-call') + count('no-validation') + count('response-mismatch');
+      const breaking = impact.report ? impact.report.summary.high : 0;
+      const highSecurity = result?.security.filter((f) => f.severity === 'high' && !dismissals.has(f.id)).length ?? 0;
+      status.text = `$(symbol-interface) ${n} endpoint${n === 1 ? '' : 's'}${problems ? ` $(warning) ${problems}` : ''}${breaking ? ` $(git-compare) ${breaking}` : ''}${highSecurity ? ` $(shield) ${highSecurity}` : ''}${noAuth ? ` $(unlock) ${noAuth}` : ''}${controller.isAnalyzing ? ' $(sync~spin)' : ''}`;
       status.tooltip = result
-        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s), ${count('unreachable')} unreachable route(s), ${count('broken-call')} call(s) to missing routes, ${count('no-validation')} unvalidated request bod(ies), ${noAuth} endpoint(s) without detected auth. ${result.clientCalls.length} client and test call(s) found. Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached).`
+        ? `API Shadow: ${n} endpoint(s), ${dups} potential duplicate route group(s), ${count('unreachable')} unreachable route(s), ${count('broken-call')} call(s) to missing routes, ${count('response-mismatch')} read(s) of missing response fields, ${count('no-validation')} unvalidated request bod(ies), ${noAuth} endpoint(s) without detected auth, ${breaking} high-risk change(s)${impact.report ? ` since ${impact.report.baseLabel}` : ''}, ${highSecurity} high-severity security finding(s). ${result.clientCalls.length} client and test call(s) found. Last analysis ${result.stats.durationMs} ms (${result.stats.filesAnalyzed} parsed, ${result.stats.filesFromCache} cached). Click to open the dashboard.`
         : 'API Shadow';
     }
     status.accessibilityInformation = { label: status.tooltip as string };
     status.show();
+  };
+
+  let dashboard: Dashboard | undefined;
+  const publishDiagnostics = (): void => {
+    const result = controller.current;
+    if (!result) return;
+    const s = controller.settings;
+    diagnostics.update(
+      result,
+      { duplicates: s.duplicateDiagnostics, unreachable: s.unreachableDiagnostics, brokenCalls: s.brokenCallDiagnostics, responseMismatch: s.responseMismatchDiagnostics, impact: s.impact.diagnostics, security: s.security.diagnostics },
+      { impact: impact.report, dismissed: dismissals.ids },
+    );
   };
 
   context.subscriptions.push(
@@ -89,6 +119,12 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     tree,
     issues,
     diagnostics,
+    dismissals,
+    impact,
+    security,
+    securityView,
+    { dispose: () => dashboard?.dispose() },
+    vscode.languages.registerCodeActionsProvider({ scheme: 'file' }, new ApiShadowCodeActions(diagnostics), ApiShadowCodeActions.metadata),
     codeLens,
     flow,
     vscode.languages.registerCodeLensProvider(sourceFiles, codeLens),
@@ -101,16 +137,48 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     controller.onDidChangeResult((result) => {
       tree.setResult(result);
       issues.setResult(result);
+      security.setResult(result);
       codeLens.setResult(result);
       clientLinks.setResult(result);
-      diagnostics.update(result, { duplicates: controller.settings.duplicateDiagnostics, unreachable: controller.settings.unreachableDiagnostics, brokenCalls: controller.settings.brokenCallDiagnostics });
+      publishDiagnostics();
       updateViewState();
       updateStatus();
+      dashboard?.refresh();
+      void impact.update(result);
     }),
-    controller.onDidChangeAnalyzing(() => updateStatus()),
+    controller.onDidChangeAnalyzing(() => {
+      updateStatus();
+      dashboard?.refresh();
+    }),
+    impact.onDidChange(() => {
+      publishDiagnostics();
+      updateStatus();
+      dashboard?.refresh();
+    }),
+    dismissals.onDidChange(() => {
+      publishDiagnostics();
+      updateViewState();
+      updateStatus();
+      dashboard?.refresh();
+    }),
   );
 
   registerCommands({ context, controller, tree, logger, flow, onViewStateChanged: updateViewState });
+  const actions = registerIntelCommands({ context, controller, impact, dismissals, tree, logger, dashboard: () => (dashboard ??= createDashboard()) }, intel);
+  function createDashboard(): Dashboard {
+    return new Dashboard({
+      extensionUri: context.extensionUri,
+      controller,
+      impact,
+      dismissals,
+      logger,
+      contractFiles: () => intel.contractFiles,
+      lastContract: () => intel.lastContract,
+      testProjects: () => intel.testProjects,
+      generateTests: actions.generateTests,
+      compareContract: actions.compareContract,
+    });
+  }
   void vscode.commands.executeCommand('setContext', 'apiShadow.filtered', false);
   updateStatus();
 
@@ -127,6 +195,7 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
     onDidChangeResult: controller.onDidChangeResult,
     getTreeChildren: (node) => tree.getChildren(node),
     getTreeItem: (node) => tree.getTreeItem(node),
+    getImpactReport: () => impact.report,
   };
 }
 

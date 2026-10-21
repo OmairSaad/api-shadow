@@ -3,6 +3,11 @@ import { AUTH_WARNING_VALUES, DEFAULT_AUTH_PATTERNS, DEFAULT_PUBLIC_PATTERNS, ty
 import type { GroupBy } from '../core/view';
 import { GROUP_BY_VALUES } from '../core/view';
 import { FRAMEWORKS, type Framework } from '../core/types';
+import { gitignoreToGlobs } from '../core/exclude';
+import { SECURITY_RULES, type Severity } from '../core/security';
+
+export type ImpactBaseline = 'gitHead' | 'session';
+export type DiagnosticLevel = Exclude<Severity, 'info'> | 'off';
 
 export interface ApiShadowConfig {
   frameworks: Set<Framework>;
@@ -29,6 +34,14 @@ export interface ApiShadowConfig {
   unreachable: boolean;
   unreachableDiagnostics: boolean;
   brokenCallDiagnostics: boolean;
+  respectGitignore: boolean;
+  impact: { enabled: boolean; baseline: ImpactBaseline; diagnostics: boolean };
+  responseChecks: boolean;
+  responseMismatchDiagnostics: boolean;
+  security: { enabled: boolean; disabledRules: string[]; exclude: string[]; diagnostics: DiagnosticLevel };
+  contractFiles: string[];
+  graphMaxEndpoints: number;
+  testDirectory: string;
 }
 
 const ALL_FRAMEWORKS: Framework[] = [...FRAMEWORKS];
@@ -68,7 +81,28 @@ export function readConfig(): ApiShadowConfig {
     unreachable: c.get<boolean>('unreachable.enabled', true),
     unreachableDiagnostics: c.get<boolean>('diagnostics.unreachable', true),
     brokenCallDiagnostics: c.get<boolean>('diagnostics.brokenCalls', true),
+    respectGitignore: c.get<boolean>('respectGitignore', true),
+    impact: {
+      enabled: c.get<boolean>('impact.enabled', true),
+      baseline: c.get<string>('impact.baseline', 'gitHead') === 'session' ? 'session' : 'gitHead',
+      diagnostics: c.get<boolean>('diagnostics.impact', true),
+    },
+    responseChecks: c.get<boolean>('responseChecks.enabled', true),
+    responseMismatchDiagnostics: c.get<boolean>('diagnostics.responseMismatch', true),
+    security: {
+      enabled: c.get<boolean>('security.enabled', true),
+      disabledRules: stringList(c.get<unknown>('security.disabledRules'), []).filter((r) => r in SECURITY_RULES),
+      exclude: stringList(c.get<unknown>('security.exclude'), []),
+      diagnostics: diagnosticLevel(c.get<string>('diagnostics.security', 'high')),
+    },
+    contractFiles: stringList(c.get<unknown>('contracts.files'), []),
+    graphMaxEndpoints: clamp(c.get<number>('graph.maxEndpoints', 150), 10, 5000),
+    testDirectory: c.get<string>('testGeneration.directory', '').trim(),
   };
+}
+
+function diagnosticLevel(v: string | undefined): DiagnosticLevel {
+  return v === 'high' || v === 'medium' || v === 'low' || v === 'off' ? v : 'high';
 }
 
 function stringList(value: unknown, fallback: readonly string[]): string[] {
@@ -77,6 +111,24 @@ function stringList(value: unknown, fallback: readonly string[]): string[] {
 
 function clamp(value: number, min: number, max: number): number {
   return Number.isFinite(value) ? Math.min(max, Math.max(min, Math.floor(value))) : min;
+}
+
+/**
+ * Globs from the `.gitignore` at the root of each workspace folder. Negations (`!pattern`) cannot
+ * be expressed as exclusions and are skipped; nested `.gitignore` files are not read.
+ */
+export async function gitignoreGlobs(): Promise<string[]> {
+  const out: string[] = [];
+  for (const folder of vscode.workspace.workspaceFolders ?? []) {
+    let text: string;
+    try {
+      text = new TextDecoder().decode(await vscode.workspace.fs.readFile(vscode.Uri.joinPath(folder.uri, '.gitignore')));
+    } catch {
+      continue;
+    }
+    out.push(...gitignoreToGlobs(text));
+  }
+  return [...new Set(out)];
 }
 
 /** Glob patterns from `files.exclude` that are enabled (simple boolean form only). */
