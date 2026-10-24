@@ -7,7 +7,7 @@ import * as path from 'path';
 
 const workspace = path.join(os.tmpdir(), 'api-shadow-integration-workspace');
 fs.rmSync(workspace, { recursive: true, force: true });
-for (const name of ['express-app', 'nest-app', 'spring-app', 'web-app']) {
+for (const name of ['express-app', 'nest-app', 'spring-app', 'web-app', 'laravel-app']) {
   fs.cpSync(path.resolve('test/fixtures', name), path.join(workspace, name), {
     recursive: true,
     filter: (src) => !src.includes(`${path.sep}node_modules${path.sep}`),

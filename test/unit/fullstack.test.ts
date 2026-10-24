@@ -22,9 +22,9 @@ describe('Full-stack fixture workspace', async () => {
     expect(messages('broken-call')).toEqual(['No route matches GET /api/order (fetch, Orders.tsx:9).']);
   });
 
-  it('counts tests from supertest, Nest e2e specs and MockMvc', () => {
+  it('counts tests from supertest, Nest e2e specs, MockMvc and Laravel feature tests', () => {
     const tested = result.endpoints.filter((e) => (e.usage?.tests ?? 0) > 0).map((e) => `${e.method} ${e.path}`).sort();
-    expect(tested).toEqual(['GET /api/v1/users', 'GET /shop/api/v1/products', 'GET /users', 'GET /users/:id', 'GET /users/:userId']);
+    expect(tested).toEqual(['GET /api/articles', 'GET /api/v1/users', 'GET /shop/api/v1/products', 'GET /users', 'GET /users/:id', 'GET /users/:userId', 'POST /api/articles']);
   });
 
   it('finds the unreachable route and keeps test-only controllers out', () => {

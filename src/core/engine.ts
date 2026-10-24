@@ -7,11 +7,13 @@ import { analyzeJava, isJavaCandidate } from '../analyzers/javaAnalyzer';
 import { analyzeJs, isJsCandidate } from '../analyzers/jsAnalyzer';
 import { analyzeSpringConfig, isSpringConfigFile } from '../analyzers/springConfig';
 import { analyzeTsConfig, isTsConfigFile } from '../analyzers/tsconfig';
+import { analyzePhp, isPhpCandidate } from '../analyzers/phpAnalyzer';
 import { FACTS_VERSION, type FileFacts, type JsFileFacts, type RiskFact } from '../analyzers/facts';
 import { LinkContext, loc, type PathAliasConfig } from '../linkers/context';
 import { ExpressLinker } from '../linkers/expressLinker';
 import { NestLinker } from '../linkers/nestLinker';
 import { SpringLinker } from '../linkers/springLinker';
+import { LaravelLinker } from '../linkers/laravelLinker';
 import { applyAuth, DEFAULT_AUTH_OPTIONS, type AuthOptions, type CentralSecurity } from './auth';
 import { matchClientCalls, type ClientCallInput, type ClientCallOptions } from './clientCalls';
 import { isTestPath } from './exclude';
@@ -84,12 +86,12 @@ export interface SerializedCache {
   entries: Record<string, CacheEntry>;
 }
 
-const MARKERS = new Set(['package.json', 'pom.xml', 'build.gradle', 'build.gradle.kts']);
+const MARKERS = new Set(['package.json', 'pom.xml', 'build.gradle', 'build.gradle.kts', 'composer.json']);
 const JS_EXT = /\.(js|cjs|mjs|jsx|ts|cts|mts|tsx)$/i;
 const BATCH = 32;
 const MAX_LINK_ROUNDS = 4;
 
-type Kind = 'js' | 'java' | 'config' | 'tsconfig' | 'kotlin' | 'marker' | 'other';
+type Kind = 'js' | 'java' | 'config' | 'tsconfig' | 'kotlin' | 'php' | 'marker' | 'other';
 
 function kindOf(file: string): Kind {
   const base = path.basename(file);
@@ -99,6 +101,7 @@ function kindOf(file: string): Kind {
   if (JS_EXT.test(file) && !file.endsWith('.d.ts')) return 'js';
   if (file.endsWith('.java')) return 'java';
   if (file.endsWith('.kt')) return 'kotlin';
+  if (file.endsWith('.php') && !file.endsWith('.blade.php')) return 'php';
   return 'other';
 }
 
@@ -189,6 +192,7 @@ export class AnalysisEngine {
     // Frontend code may call a Spring API, so JS is read for client calls even without JS frameworks.
     const wantsJs = jsFrameworks || clientCalls.enabled;
     const wantsJava = enabled.has('spring');
+    const wantsPhp = enabled.has('laravel');
     const isTest = (f: string): boolean => !this.options.includeTestFiles && this.isTestFile(f);
 
     let analyzed = 0;
@@ -196,7 +200,7 @@ export class AnalysisEngine {
     let skipped = 0;
     const relevant = files.filter((f) => {
       const k = kindOf(f);
-      return ((k === 'js' || k === 'tsconfig') && wantsJs) || ((k === 'java' || k === 'config' || k === 'kotlin') && wantsJava);
+      return ((k === 'js' || k === 'tsconfig') && wantsJs) || ((k === 'java' || k === 'config' || k === 'kotlin') && wantsJava) || (k === 'php' && wantsPhp);
     });
     for (let i = 0; i < relevant.length; i += BATCH) {
       throwIfCancelled(token);
@@ -239,6 +243,7 @@ export class AnalysisEngine {
       if (enabled.has('express') || enabled.has('fastify') || enabled.has('koa')) endpoints.push(...new ExpressLinker(ctx).link().filter((e) => enabled.has(e.framework)));
       if (enabled.has('nestjs')) endpoints.push(...new NestLinker(ctx).link());
       if (enabled.has('spring')) endpoints.push(...new SpringLinker(ctx).link());
+      if (wantsPhp) endpoints.push(...new LaravelLinker(ctx).link());
       const requested = [...ctx.requested].filter((f) => !this.cache.get(f)?.facts);
       if (requested.length === 0) break;
       this.logger.debug(`Link round ${round + 1}: analysing ${requested.length} referenced file(s) skipped by the pre-filter.`);
@@ -259,9 +264,9 @@ export class AnalysisEngine {
     for (const f of relevant) {
       const facts = this.cache.get(f)?.facts;
       if (!facts) continue;
-      if (facts.lang === 'js' || facts.lang === 'java') {
+      if (facts.lang === 'js' || facts.lang === 'java' || facts.lang === 'php') {
         for (const fact of facts.clientCalls ?? []) {
-          const test = this.isTestFile(f) || fact.client === 'supertest' || fact.client === 'MockMvc' || fact.client === 'WebTestClient' || fact.client === 'TestRestTemplate';
+          const test = this.isTestFile(f) || fact.client === 'supertest' || fact.client === 'MockMvc' || fact.client === 'WebTestClient' || fact.client === 'TestRestTemplate' || fact.client === 'Laravel test';
           callInputs.push({ file: f, fact, kind: test ? 'test' : 'app' });
         }
       }
@@ -369,7 +374,7 @@ export class AnalysisEngine {
     }
     const facts = this.analyzeSource(file, source, force);
     const kind = kindOf(file);
-    const scanKind: ScanKind | undefined = kind === 'js' ? 'js' : kind === 'java' ? 'java' : kind === 'config' ? 'config' : undefined;
+    const scanKind: ScanKind | undefined = kind === 'js' ? 'js' : kind === 'java' ? 'java' : kind === 'config' ? 'config' : kind === 'php' ? 'php' : undefined;
     const text = scanKind ? scanText(source, scanKind) : [];
     this.cache.set(file, text.length ? { mtime: stat.mtime, size: stat.size, facts, text } : { mtime: stat.mtime, size: stat.size, facts });
     return facts ? 'analyzed' : 'prefiltered';
@@ -387,6 +392,8 @@ export class AnalysisEngine {
           return analyzeSpringConfig(source, file);
         case 'tsconfig':
           return analyzeTsConfig(source);
+        case 'php':
+          return force || isPhpCandidate(source) ? analyzePhp(source, file) : undefined;
         case 'kotlin':
           return /@(RestController|Controller|(Get|Post|Put|Patch|Delete|Request)Mapping)\b/.test(source) ? { lang: 'none', issues: [] } : undefined;
         default:

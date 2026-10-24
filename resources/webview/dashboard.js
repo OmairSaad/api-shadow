@@ -46,6 +46,8 @@
         if (v === undefined || v === null || v === false) continue;
         if (k === 'class') el.className = v;
         else if (k === 'text') el.textContent = String(v);
+        // Style attributes are blocked by the CSP; CSSOM properties are not.
+        else if (k === 'flexGrow') el.style.flexGrow = String(v);
         else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
         else if (v === true) el.setAttribute(k, '');
         else el.setAttribute(k, String(v));
@@ -264,17 +266,61 @@
     for (const e of model.impact.endpoints.filter((x) => x.risk === 'high').slice(0, 5)) {
       attention.push(h('li', {}, badge('Breaking', 'danger'), ' ', methodBadge(e.method), ' ', h('code', { text: e.path }), ' — ', e.changes[0] ? rich(e.changes[0].text) : '', ' ', linkButton('open', e.ref)));
     }
-    for (const i of model.issues.filter((x) => x.kind === 'response-mismatch' || x.kind === 'broken-call').slice(0, 5)) {
-      attention.push(h('li', {}, badge(i.kind === 'broken-call' ? 'No route' : 'Missing field', 'warn'), ' ', rich(i.message), ' ', linkButton(i.where || 'open', i.ref)));
+    const kinds = { 'response-mismatch': 'Missing field', 'broken-call': 'No route', unreachable: 'Unreachable', duplicate: 'Duplicate' };
+    for (const i of model.issues.filter((x) => kinds[x.kind]).slice(0, 8)) {
+      attention.push(h('li', {}, badge(kinds[i.kind], i.kind === 'unreachable' ? 'danger' : 'warn'), ' ', rich(i.message), ' ', linkButton(i.where || 'open', i.ref)));
     }
     for (const f of model.security.filter((x) => x.severity === 'high' && !x.dismissed).slice(0, 5)) {
       attention.push(h('li', {}, badge('Security', 'danger'), ' ', f.title, f.endpoint ? ` — ${f.endpoint}` : '', ' ', linkButton(f.where || 'open', f.ref)));
     }
     const conf = s.confidence;
+    // At a glance: how the API is split by method, and its largest path prefixes with their mounts.
+    const total = Math.max(1, s.endpoints);
+    const bar = h(
+      'div',
+      { class: 'mbar', role: 'img', 'aria-label': METHODS.filter((m) => s.byMethod[m]).map((m) => `${m} ${s.byMethod[m]}`).join(', ') },
+      METHODS.filter((m) => s.byMethod[m]).map((m) => h('span', { class: `mseg m-${m.toLowerCase()}`, flexGrow: s.byMethod[m], title: `${m}: ${s.byMethod[m]} (${Math.round((s.byMethod[m] / total) * 100)}%)` })),
+    );
+    const legend = h('div', { class: 'mlegend' }, METHODS.filter((m) => s.byMethod[m]).map((m) => h('span', {}, h('span', { class: `mswatch m-${m.toLowerCase()}`, 'aria-hidden': 'true' }), `${m} ${s.byMethod[m]}`)));
+    const prefixes = [];
+    const collect = (node, depth) => {
+      for (const c of node.children.values()) {
+        if (depth < 2) {
+          prefixes.push(c);
+          collect(c, depth + 1);
+        }
+      }
+    };
+    collect(buildApiMap(), 0);
+    prefixes.sort((a, b) => countEndpoints(b) - countEndpoints(a) || a.path.localeCompare(b.path));
+    const glance = h(
+      'section',
+      { class: 'card glance' },
+      h('h2', { text: 'API at a glance' }),
+      bar,
+      legend,
+      h(
+        'ul',
+        { class: 'plain prefixes' },
+        prefixes.slice(0, 6).map((p) =>
+          h(
+            'li',
+            {},
+            h('button', { type: 'button', class: 'link', onclick: () => {
+              Object.assign(ui.explorer, { view: 'map', mapText: p.path });
+              selectTab('explorer');
+            } }, p.path),
+            h('span', { class: 'muted', text: ` ${countEndpoints(p)} endpoint(s)` }),
+            p.mount ? [' · ', h('button', { type: 'button', class: 'mount-link', title: p.mount.text, onclick: () => open(p.mount.ref) }, h('span', { class: 'muted', text: 'mounted at ' }), h('span', { class: 'mount-file', text: p.mount.where }))] : null,
+          ),
+        ),
+      ),
+    );
     return h(
       'div',
       {},
       grid,
+      glance,
       h('section', { class: 'card' }, h('h2', { text: 'Needs attention' }), attention.length ? h('ul', { class: 'plain' }, attention) : h('p', { class: 'muted', text: 'Nothing urgent: no high-risk changes, missing routes, missing fields or high-severity findings.' })),
       h(
         'section',
@@ -301,7 +347,7 @@
     const seg = h(
       'div',
       { class: 'segmented', role: 'group', 'aria-label': 'Explorer view' },
-      [['endpoints', `Endpoints (${model.endpoints.length})`], ['requests', `Frontend requests (${model.calls.filter((c) => c.kind === 'app').length})`], ['issues', `Coverage findings (${model.issues.length})`]].map(([v, label]) =>
+      [['endpoints', `Endpoints (${model.endpoints.length})`], ['map', 'API map'], ['requests', `Frontend requests (${model.calls.filter((c) => c.kind === 'app').length})`], ['issues', `Coverage findings (${model.issues.length})`]].map(([v, label]) =>
         chip(label, x.view === v, () => {
           x.view = v;
           persist();
@@ -309,6 +355,7 @@
         }),
       ),
     );
+    if (x.view === 'map') return h('div', {}, seg, apiMapView());
     if (x.view === 'requests') return h('div', {}, seg, requestsView());
     if (x.view === 'issues') return h('div', {}, seg, issuesView());
     const frameworks = [...new Set(model.endpoints.map((e) => e.framework))];
@@ -360,20 +407,59 @@
         list.append(caption, empty('No endpoints match these filters.'));
         return;
       }
-      const table = h('table', { class: 'grid' }, h('thead', {}, h('tr', {}, ['Method', 'Path', 'Handler', 'Auth', 'Callers', 'Response'].map((c) => h('th', { scope: 'col', text: c })))));
+      const sort = x.sort || { key: 'path', dir: 1 };
+      const columns = [
+        ['method', 'Method', (e) => METHODS.indexOf(e.method)],
+        ['path', 'Path', (e) => e.path],
+        ['handler', 'Handler', (e) => handlerLabel(e)],
+        ['auth', 'Auth', (e) => e.auth],
+        ['mount', 'Mounted at', (e) => mountOf(e)?.where || '~'],
+        ['callers', 'Callers', (e) => e.callers * 1000 + e.tests],
+        ['response', 'Response', (e) => e.response || ''],
+      ];
+      const keyOf = (columns.find((c) => c[0] === sort.key) || columns[1])[2];
+      rows.sort((a, b) => {
+        const va = keyOf(a);
+        const vb = keyOf(b);
+        const d = typeof va === 'number' && typeof vb === 'number' ? va - vb : String(va).localeCompare(String(vb));
+        return d * sort.dir || a.path.localeCompare(b.path) || METHODS.indexOf(a.method) - METHODS.indexOf(b.method);
+      });
+      const head = h(
+        'tr',
+        {},
+        columns.map(([key, label]) =>
+          h(
+            'th',
+            { scope: 'col', 'aria-sort': sort.key === key ? (sort.dir > 0 ? 'ascending' : 'descending') : 'none' },
+            h('button', { type: 'button', class: 'sort', title: `Sort by ${label.toLowerCase()}`, 'aria-label': `Sort by ${label.toLowerCase()}`, onclick: () => {
+              x.sort = { key, dir: sort.key === key ? -sort.dir : 1 };
+              persist();
+              renderList();
+            } }, label, sort.key === key ? h('span', { class: 'arrow', 'aria-hidden': 'true', text: sort.dir > 0 ? ' ▲' : ' ▼' }) : null),
+          ),
+        ),
+      );
+      const table = h('table', { class: 'grid', 'aria-label': 'Endpoints' }, h('thead', {}, head));
       const body = h('tbody');
-      for (const e of rows.slice(0, 1000)) {
-        const tr = h(
+      const shown = rows.slice(0, 1000);
+      for (const [index, e] of shown.entries()) {        const tr = h(
           'tr',
           {
             tabindex: '0',
             class: e.id === x.selected ? 'sel' : '',
             'aria-selected': e.id === x.selected ? 'true' : 'false',
             onclick: () => selectEndpoint(e.id),
+            'data-index': String(index),
+            'data-id': e.id,
             onkeydown: (ev) => {
               if (ev.key === 'Enter' || ev.key === ' ') {
                 ev.preventDefault();
                 selectEndpoint(e.id);
+              } else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+                // Move through rows like a list; the details follow the focused row.
+                ev.preventDefault();
+                const next = shown[index + (ev.key === 'ArrowDown' ? 1 : -1)];
+                if (next) selectEndpoint(next.id, true);
               }
             },
           },
@@ -381,7 +467,8 @@
           h('td', {}, h('code', { text: e.path }), e.confidence !== 'high' ? badge(e.confidence === 'low' ? 'dynamic' : 'unmounted', 'muted') : null, e.impacted ? badge(`impact ${e.impacted}`, e.impacted === 'high' ? 'danger' : 'warn') : null, e.security ? badge(`${e.security} security`, 'warn') : null),
           h('td', { text: handlerLabel(e) }),
           h('td', {}, authBadge(e)),
-          h('td', { text: `${e.callers} · ${e.tests} test${e.tests === 1 ? '' : 's'}` }),
+          h('td', { class: 'mount small' }, mountCell(e)),
+          h('td', { class: 'nowrap', text: `${e.callers} · ${e.tests} test${e.tests === 1 ? '' : 's'}` }),
           h('td', { class: 'mono small', text: e.response || '' }),
         );
         body.appendChild(tr);
@@ -393,9 +480,13 @@
     function selectEndpoint(id) {
       x.selected = id;
       persist();
-      for (const tr of list.querySelectorAll('tr.sel')) tr.classList.remove('sel');
       renderDetails();
       renderList();
+      const row = list.querySelector(`tr[data-id="${CSS.escape(id)}"]`);
+      if (row) {
+        row.focus({ preventScroll: true });
+        row.scrollIntoView({ block: 'nearest' });
+      }
     }
     function renderDetails() {
       details.textContent = '';
@@ -446,47 +537,259 @@
     const callers = model.calls.filter((c) => c.endpointIds.includes(e.id));
     const app = callers.filter((c) => c.kind === 'app');
     const tests = callers.filter((c) => c.kind === 'test');
-    const section = (title, ...content) => h('section', {}, h('h3', { text: title }), ...content);
-    const kv = (k, v) => (v === undefined || v === null || v === '' ? null : h('div', { class: 'kv' }, h('span', { class: 'k', text: k }), h('span', { class: 'v' }, v)));
+    const findings = model.security.filter((f) => f.endpointId === e.id && !f.dismissed);
+    const card = (title, ...content) => h('section', { class: 'dcard' }, h('h3', { text: title }), ...content);
+    const action = (label, title, onclick) => h('button', { type: 'button', class: 'act', title, onclick }, label);
+    const statusChip = (s) => h('span', { class: `chip-status s${String(s)[0]}`, text: String(s) });
+    const confidence = { high: ['resolved', 'ok'], medium: ['unmounted router', 'warn'], low: ['dynamic path', 'warn'] }[e.confidence] || ['', ''];
+
+    // How the path is built: each mount, prefix or group, then the route and its handler.
+    const steps = [
+      ...e.trace.map((t) => ({ text: t.text, where: t.where, ref: t.ref })),
+      { text: `Route ${e.method} declared`, where: e.where, ref: e.ref, strong: true },
+      ...(e.handlerRef !== undefined && e.handler ? [{ text: `Handled by ${handlerLabel(e)}`, where: undefined, ref: e.handlerRef }] : []),
+    ];
+    const stepper = h(
+      'ol',
+      { class: 'stepper' },
+      steps.map((st, i) =>
+        h(
+          'li',
+          { class: `step${st.strong ? ' strong' : ''}${typeof st.ref === 'number' ? ' clickable' : ''}`, tabindex: typeof st.ref === 'number' ? '0' : undefined, role: typeof st.ref === 'number' ? 'button' : undefined, 'aria-label': typeof st.ref === 'number' ? `${st.text}, open ${st.where || 'source'}` : undefined, onclick: () => open(st.ref), onkeydown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(st.ref); } } },
+          h('span', { class: 'dot', 'aria-hidden': 'true', text: String(i + 1) }),
+          h('span', { class: 'stext' }, rich(st.text)),
+          st.where ? h('span', { class: 'sloc', text: st.where }) : typeof st.ref === 'number' ? h('span', { class: 'sloc', text: 'open' }) : h('span', { class: 'sloc muted', text: 'not in source' }),
+        ),
+      ),
+    );
+
+    const params = e.params.length
+      ? h('table', { class: 'mini' }, h('thead', {}, h('tr', {}, ['Name', 'In', 'Required', 'Type'].map((c) => h('th', { scope: 'col', text: c })))), h('tbody', {}, e.params.map((p) => h('tr', {}, h('td', {}, h('code', { text: p.name })), h('td', { text: p.in }), h('td', { text: p.required ? 'yes' : 'no' }), h('td', { text: p.type || '' })))))
+      : h('p', { class: 'muted', text: 'No path, query or header parameters.' });
+
     return h(
       'div',
-      {},
-      h('h2', {}, methodBadge(e.method), ' ', h('code', { text: e.path })),
-      h('div', { class: 'row' }, linkButton('Open route', e.ref), e.handlerRef !== undefined ? linkButton('Open handler', e.handlerRef) : null, button('Generate tests', () => {
-        ui.tests.selected = [e.id];
-        persist();
-        selectTab('tests');
-      })),
-      kv('Framework', e.framework),
-      kv('Handler', handlerLabel(e)),
-      kv('Source', e.where),
-      kv('Auth', [authBadge(e), e.authVia.length ? ` ${e.authVia.join(', ')}` : '']),
-      kv('Validation', e.validation),
-      kv('Confidence', e.confidence === 'high' ? 'Path fully resolved' : e.confidence === 'medium' ? 'Relative to a router whose mount point was not found' : 'Contains parts that could not be resolved statically'),
-      kv('Version', e.version),
-      e.params.length ? section('Parameters', h('ul', { class: 'plain' }, e.params.map((p) => h('li', {}, h('code', { text: p.name }), ` ${p.in}${p.required ? ', required' : ''}${p.type ? `, ${p.type}` : ''}`)))) : null,
-      e.body ? section('Request body', h('code', { text: e.body })) : null,
-      section('Response (inferred)', e.response ? h('code', { class: 'block', text: e.response }) : h('p', { class: 'muted', text: 'Not known statically (the handler returns a value API Shadow cannot see into).' }), e.statuses.length ? h('p', { text: `Status codes seen: ${e.statuses.join(', ')}` }) : null),
-      e.middleware.length ? section('Middleware', h('ul', { class: 'plain' }, e.middleware.map((m) => h('li', {}, h('code', { text: m }))))) : null,
+      { class: 'endpoint-details' },
+      h(
+        'header',
+        { class: 'dhead' },
+        h('div', { class: 'dtitle' }, h('h2', {}, methodBadge(e.method), ' ', h('code', { class: 'dpath', text: e.path })), h('button', { type: 'button', class: 'icon', title: 'Copy path', 'aria-label': 'Copy path', onclick: () => send({ type: 'copy', text: e.path }) }, '⧉')),
+        h('div', { class: 'dmeta' }, h('span', { text: handlerLabel(e) || 'no handler' }), ' · ', h('span', { text: e.framework }), ' ', authBadge(e), confidence[0] ? badge(confidence[0], confidence[1]) : null, e.impacted ? badge(`impact ${e.impacted}`, e.impacted === 'high' ? 'danger' : 'warn') : null),
+      ),
+      h(
+        'div',
+        { class: 'actions-bar', role: 'toolbar', 'aria-label': 'Endpoint actions' },
+        action('Open route', `Open ${e.where}`, () => open(e.ref)),
+        e.handlerRef !== undefined ? action('Open handler', 'Open the handler function', () => open(e.handlerRef)) : null,
+        action('Request flow', 'Callers → middleware → handler → services', () => send({ type: 'endpoint', action: 'flow', id: e.id })),
+        action('Try it', 'Open a ready-to-send .http request', () => send({ type: 'endpoint', action: 'request', id: e.id })),
+        action('Copy cURL', 'Copy as a cURL command', () => send({ type: 'endpoint', action: 'curl', id: e.id })),
+        action('Generate tests', 'Preview and create tests for this endpoint', () => {
+          ui.tests.selected = [e.id];
+          persist();
+          selectTab('tests');
+        }),
+      ),
+      card('How this path is built', stepper),
+      card(
+        'Request',
+        params,
+        e.body ? h('div', { class: 'kv' }, h('span', { class: 'k', text: 'Body' }), h('code', { class: 'v', text: e.body })) : null,
+        e.validation ? h('div', { class: 'kv' }, h('span', { class: 'k', text: 'Validation' }), h('span', { class: 'v' }, badge(e.validation === 'validated' ? 'validated' : 'not validated', e.validation === 'validated' ? 'ok' : 'warn'))) : null,
+        e.version ? h('div', { class: 'kv' }, h('span', { class: 'k', text: 'Version' }), h('span', { class: 'v', text: e.version })) : null,
+      ),
+      card(
+        'Response (inferred)',
+        e.statuses.length ? h('div', { class: 'chips' }, e.statuses.map(statusChip)) : null,
+        e.response ? h('code', { class: 'block', text: e.response }) : h('p', { class: 'muted', text: 'Not known statically: the handler returns a value API Shadow cannot see into.' }),
+      ),
+      e.middleware.length || e.authVia.length
+        ? card('Middleware and auth', h('ol', { class: 'mw' }, e.middleware.map((m) => h('li', { class: e.authVia.includes(m) ? 'auth' : '' }, h('code', { text: m }), e.authVia.includes(m) ? badge('auth', 'ok') : null))))
+        : null,
       e.services.length || e.dataAccess.length
-        ? section(
+        ? card(
             'Implementation',
             h(
               'ul',
               { class: 'plain' },
-              e.services.map((s) => h('li', {}, linkButton(s.name, s.ref), s.uses.length ? h('span', { class: 'muted', text: ` → ${s.uses.join(', ')}` }) : null)),
-              e.dataAccess.map((d) => h('li', {}, h('code', { text: d }), h('span', { class: 'muted', text: ' (data access)' }))),
+              e.services.map((sv) => h('li', {}, linkButton(sv.name, sv.ref), sv.uses.length ? h('span', { class: 'muted', text: ` → ${sv.uses.join(', ')}` }) : null)),
+              e.dataAccess.map((d) => h('li', {}, h('code', { text: d }), h('span', { class: 'muted', text: ' data access' }))),
             ),
           )
         : null,
-      section(
+      card(
         `Frontend callers (${app.length})`,
         app.length
           ? h('ul', { class: 'plain' }, app.map((c) => h('li', {}, linkButton(c.within || c.where, c.ref, c.where), h('span', { class: 'muted', text: ` ${c.client} · ${c.where}` }), c.reads.length ? h('div', { class: 'small' }, 'reads ', c.reads.map((r, i) => [i ? ', ' : '', h('code', { text: r })])) : null, c.consumers.length ? h('div', { class: 'small' }, 'used by ', c.consumers.map((u, i) => [i ? ', ' : '', linkButton(u.within || u.where, u.ref)])) : null)))
           : h('p', { class: 'muted', text: 'No caller found in the workspace. It may be called by other apps or services.' }),
+        app.length ? action('Show all callers', 'Peek every caller in the editor', () => send({ type: 'endpoint', action: 'callers', id: e.id })) : null,
       ),
-      section(`Tests (${tests.length})`, tests.length ? h('ul', { class: 'plain' }, tests.map((c) => h('li', {}, linkButton(c.where, c.ref), h('span', { class: 'muted', text: ` ${c.client}` })))) : h('p', { class: 'muted', text: 'No test request found.' })),
-      e.notes.length ? section('Analysis notes', h('ul', { class: 'plain small' }, e.notes.map((n) => h('li', { text: n })))) : null,
+      card(`Tests (${tests.length})`, tests.length ? h('ul', { class: 'plain' }, tests.map((c) => h('li', {}, linkButton(c.where, c.ref), h('span', { class: 'muted', text: ` ${c.client}` })))) : h('p', { class: 'muted', text: 'No test request found.' })),
+      findings.length
+        ? card(
+            `Security (${findings.length})`,
+            h('ul', { class: 'plain' }, findings.map((f) => h('li', {}, badge(f.severity, f.severity === 'high' ? 'danger' : f.severity === 'medium' ? 'warn' : 'muted'), ' ', h('button', { type: 'button', class: 'link', onclick: () => { focusId = f.id; selectTab('security'); revealFocus(); } }, f.title), ' ', linkButton(f.where, f.ref)))),
+          )
+        : null,
+      e.notes.length ? card('Analysis notes', h('ul', { class: 'plain small' }, e.notes.map((n) => h('li', {}, rich(n))))) : null,
+    );
+  }
+
+  /** The innermost step of the endpoint's path that has a source location (where it is mounted). */
+  function mountOf(e) {
+    for (let i = e.trace.length - 1; i >= 0; i--) if (typeof e.trace[i].ref === 'number') return e.trace[i];
+    return undefined;
+  }
+
+  /** `"/api" app.js:12` as a link that opens the mount; clicks don't select the row. */
+  function mountCell(e) {
+    const m = mountOf(e);
+    if (!m) return h('span', { class: 'muted', text: '—' });
+    const prefix = /["']([^"']*)["']/.exec(m.text);
+    return h(
+      'button',
+      { type: 'button', class: 'mount-link', title: `${m.text} — ${m.where}. Click to open.`, 'aria-label': `${m.text}, open ${m.where}`, onclick: (ev) => { ev.stopPropagation(); open(m.ref); }, onkeydown: (ev) => ev.stopPropagation() },
+      prefix ? h('code', { text: prefix[1] || '/' }) : null,
+      h('span', { class: 'mount-file', text: m.where.split('/').pop() }),
+    );
+  }
+
+  /**
+   * The API as a tree of path segments. A prefix that a mount, global prefix, controller or group
+   * adds shows where it is declared; leaves are endpoints.
+   */
+  function buildApiMap() {
+    const root = { seg: '', path: '', children: new Map(), endpoints: [], mounts: [] };
+    for (const e of model.endpoints) {
+      // Prefixes added by trace steps, accumulated: `/api`, `/api/users`.
+      const declared = new Map();
+      let acc = '';
+      for (const t of e.trace) {
+        const q = /["']([^"']*)["']/.exec(t.text);
+        if (!q || typeof t.ref !== 'number') continue;
+        acc = joinPath(acc, q[1]);
+        if (acc !== '/' && !declared.has(acc)) declared.set(acc, t);
+      }
+      const segments = e.path.split(' ~ ')[0].split('/').filter(Boolean);
+      let node = root;
+      let p = '';
+      for (const seg of segments) {
+        p = `${p}/${seg}`;
+        let next = node.children.get(seg);
+        if (!next) {
+          next = { seg, path: p, children: new Map(), endpoints: [], mounts: [] };
+          node.children.set(seg, next);
+        }
+        // A prefix can be mounted in several places (two apps, two routers): keep each once.
+        const m = declared.get(p);
+        if (m && !next.mounts.some((x) => x.ref === m.ref || x.where === m.where)) next.mounts.push(m);
+        node = next;
+      }
+      node.endpoints.push(e);
+    }
+    return root;
+  }
+
+  function joinPath(a, b) {
+    const out = `${a.replace(/\/+$/, '')}/${String(b).replace(/^\/+/, '')}`.replace(/\/+/g, '/');
+    return out.length > 1 ? out.replace(/\/$/, '') : out;
+  }
+
+  function countEndpoints(node) {
+    let n = node.endpoints.length;
+    for (const c of node.children.values()) n += countEndpoints(c);
+    return n;
+  }
+
+  function methodsUnder(node, out = new Set()) {
+    for (const e of node.endpoints) out.add(e.method);
+    for (const c of node.children.values()) methodsUnder(c, out);
+    return out;
+  }
+
+  function apiMapView() {
+    const x = ui.explorer;
+    x.collapsed = x.collapsed || [];
+    const root = buildApiMap();
+    const terms = (x.mapText || '').toLowerCase().split(/\s+/).filter(Boolean);
+    const matches = (node) => !terms.length || terms.every((t) => node.path.toLowerCase().includes(t)) || [...node.children.values()].some(matches) || node.endpoints.some((e) => terms.every((t) => `${e.method} ${e.path} ${handlerLabel(e)}`.toLowerCase().includes(t)));
+    const toggle = (path) => {
+      x.collapsed = x.collapsed.includes(path) ? x.collapsed.filter((p) => p !== path) : [...x.collapsed, path];
+      persist();
+      render();
+    };
+    const renderNode = (node, depth) => {
+      const kids = [...node.children.values()].filter(matches).sort((a, b) => a.seg.localeCompare(b.seg));
+      const expanded = terms.length > 0 || !x.collapsed.includes(node.path);
+      const isParam = /^[:{]/.test(node.seg);
+      const label = h(
+        'div',
+        { class: `map-row depth-${Math.min(depth, 6)}` },
+        kids.length
+          ? h('button', { type: 'button', class: 'twisty', 'aria-expanded': expanded ? 'true' : 'false', 'aria-label': `${expanded ? 'Collapse' : 'Expand'} ${node.path}`, onclick: () => toggle(node.path) }, expanded ? '▾' : '▸')
+          : h('span', { class: 'twisty spacer', 'aria-hidden': 'true' }),
+        h('code', { class: `seg${isParam ? ' param' : ''}`, text: `/${node.seg}` }),
+        h('span', { class: 'count', title: 'Endpoints under this path', text: String(countEndpoints(node)) }),
+        h('span', { class: 'methods' }, [...methodsUnder(node)].map((m) => h('span', { class: `mdot m-${m.toLowerCase()}`, title: m, text: m }))),
+        node.mounts.length ? h('span', { class: 'muted mount-label', text: 'mounted at' }) : null,
+        node.mounts.map((m) => h('button', { type: 'button', class: 'mount-link', title: `${m.text} — ${m.where}. Click to open.`, 'aria-label': `${node.path} mounted at ${m.where}, open`, onclick: () => open(m.ref) }, h('span', { class: 'mount-file', text: m.where }))),
+      );
+      const leaves = node.endpoints.map((e) =>
+        h(
+          'li',
+          { class: 'map-endpoint' },
+          h(
+            'button',
+            { type: 'button', class: 'leaf', onclick: () => {
+              x.view = 'endpoints';
+              x.selected = e.id;
+              x.text = '';
+              persist();
+              render();
+            }, title: 'Show endpoint details' },
+            methodBadge(e.method),
+            ' ',
+            h('span', { text: handlerLabel(e) || e.path }),
+          ),
+          ' ',
+          linkButton(e.where, e.ref),
+        ),
+      );
+      return h('li', { class: 'map-node' }, label, expanded && (leaves.length || kids.length) ? h('ul', { class: 'map-children' }, leaves, kids.map((k) => renderNode(k, depth + 1))) : null);
+    };
+    const top = [...root.children.values()].filter(matches).sort((a, b) => a.seg.localeCompare(b.seg));
+    const toolbar = h(
+      'div',
+      { class: 'toolbar' },
+      search('Filter paths…', x.mapText || '', (v) => {
+        x.mapText = v;
+        persist();
+        render();
+      }, 'Filter the API map'),
+      button('Expand all', () => {
+        x.collapsed = [];
+        persist();
+        render();
+      }),
+      button('Collapse all', () => {
+        const all = [];
+        const walk = (n) => n.children.forEach((c) => {
+          if (c.children.size) all.push(c.path);
+          walk(c);
+        });
+        walk(root);
+        x.collapsed = all;
+        persist();
+        render();
+      }),
+    );
+    if (!top.length && !root.endpoints.length) return h('div', {}, toolbar, empty('No paths match.'));
+    return h(
+      'div',
+      {},
+      toolbar,
+      h('p', { class: 'muted small', text: 'Every path prefix of the API. "mounted at" opens the line that adds the prefix: app.use(), a global prefix, @Controller/@RequestMapping, a route group or a loaded route file.' }),
+      h('ul', { class: 'api-map', 'aria-label': 'API map' }, root.endpoints.length ? renderNode({ ...root, seg: '', path: '/', children: new Map() }, 0) : null, top.map((n) => renderNode(n, 0))),
     );
   }
 
@@ -739,7 +1042,7 @@
         persist();
         render();
       }, 'Only what the current change may affect'),
-      h('div', { class: 'row' }, button('−', () => zoom(1 / 1.25), { 'aria-label': 'Zoom out' }), button('+', () => zoom(1.25), { 'aria-label': 'Zoom in' }), button('Fit', () => fit(), { 'aria-label': 'Fit to view' }), button('Export…', () => command('apiShadow.exportGraph'), { title: 'Save as Mermaid or JSON' })),
+      h('div', { class: 'row' }, button('−', () => zoom(1 / 1.25), { 'aria-label': 'Zoom out' }), h('span', { id: 'zoom-level', class: 'zoom-level', 'aria-live': 'polite', text: `${Math.round(view.k * 100)}%` }), button('+', () => zoom(1.25), { 'aria-label': 'Zoom in' }), button('Fit', () => fit(), { 'aria-label': 'Fit to view' }), button('Export…', () => command('apiShadow.exportGraph'), { title: 'Save as Mermaid or JSON' })),
     );
     const note = g.endpoints.shown < g.endpoints.total ? h('p', { class: 'muted small', role: 'status', text: `Showing ${g.endpoints.shown} of ${g.endpoints.total} endpoints (most connected first). Focus on a path or controller to see others.` }) : null;
     const { nodes, edges } = visibleGraph(g);
@@ -787,12 +1090,13 @@
           ev.preventDefault();
           selectNode(n.id);
         } else if (ev.key === 'o' || ev.key === 'O') open(n.ref);
+        else if (ev.key === 'Escape') selectNode('');
       });
       root.appendChild(g2);
     }
     canvas.appendChild(s);
     const details = h('aside', { class: 'details graph-details', 'aria-label': 'Node details' }, nodeDetails(nodes, edges, selected));
-    const legend = h('p', { class: 'legend small' }, h('span', { class: 'lg unmatched', text: 'dashed: no matching route' }), h('span', { class: 'lg uncalled', text: 'faded: no caller found' }), h('span', { class: 'lg impacted', text: 'red outline: affected by the change' }), h('span', { class: 'lg ambiguous', text: 'dotted edge: several candidate routes' }));
+    const legend = h('p', { class: 'legend small' }, h('span', { class: 'lg unmatched', text: 'dashed: no matching route' }), h('span', { class: 'lg uncalled', text: 'faded: no caller found' }), h('span', { class: 'lg impacted', text: 'red outline: affected by the change' }), h('span', { class: 'lg ambiguous', text: 'dotted edge: several candidate routes' }), h('span', { class: 'lg hint', text: 'Drag to pan · scroll to zoom · Esc clears the selection · O opens source' }));
     const wrap = h('div', { class: 'graph-layout' }, canvas, details);
     setTimeout(() => {
       apply();
@@ -804,6 +1108,8 @@
     });
     function apply() {
       root.setAttribute('transform', `translate(${view.x},${view.y}) scale(${view.k})`);
+      const level = document.getElementById('zoom-level');
+      if (level) level.textContent = `${Math.round(view.k * 100)}%`;
     }
     function zoom(f, cx, cy) {
       const r = s.getBoundingClientRect();
@@ -833,6 +1139,8 @@
     }
     function installPanZoom(el) {
       let drag;
+      /** Set when the pointer moved enough to be a pan; the click that ends a pan is ignored. */
+      let panned = false;
       el.addEventListener('wheel', (ev) => {
         ev.preventDefault();
         const r = el.getBoundingClientRect();
@@ -841,17 +1149,26 @@
       el.addEventListener('pointerdown', (ev) => {
         if (ev.target.closest && ev.target.closest('.node')) return;
         drag = { x: ev.clientX, y: ev.clientY, vx: view.x, vy: view.y };
+        panned = false;
         el.setPointerCapture(ev.pointerId);
       });
       el.addEventListener('pointermove', (ev) => {
         if (!drag) return;
+        if (Math.abs(ev.clientX - drag.x) + Math.abs(ev.clientY - drag.y) > 4) panned = true;
         view.x = drag.vx + ev.clientX - drag.x;
         view.y = drag.vy + ev.clientY - drag.y;
         apply();
       });
-      el.addEventListener('pointerup', () => (drag = undefined));
+      const endDrag = () => (drag = undefined);
+      el.addEventListener('pointerup', endDrag);
+      el.addEventListener('pointercancel', endDrag);
       el.addEventListener('click', (ev) => {
-        if (ev.target === el && x.selected) selectNode('');
+        // Only a click on empty canvas clears the selection, never the end of a pan.
+        if (panned) {
+          panned = false;
+          return;
+        }
+        if (!(ev.target.closest && ev.target.closest('.node')) && x.selected) selectNode('');
       });
       el.addEventListener('keydown', (ev) => {
         const step = 40;
@@ -862,6 +1179,7 @@
         else if (ev.key === 'ArrowDown') view.y -= step;
         else if (ev.key === '+' || ev.key === '=') return zoom(1.2);
         else if (ev.key === '-') return zoom(1 / 1.2);
+        else if (ev.key === 'Escape' && x.selected) return selectNode('');
         else return;
         ev.preventDefault();
         apply();
@@ -1091,7 +1409,7 @@
     const terms = x.text.toLowerCase().split(/\s+/).filter(Boolean);
     const rows = model.endpoints.filter((e) => !terms.length || terms.every((t) => `${e.method} ${e.path} ${handlerLabel(e)} ${e.where}`.toLowerCase().includes(t)));
     const projects = model.testProjects.length
-      ? h('ul', { class: 'plain' }, model.testProjects.map((p) => h('li', {}, h('code', { text: p.label }), ` · ${p.kind === 'java' ? 'JUnit 5 + MockMvc' : `${p.runner} + Supertest`}`)))
+      ? h('ul', { class: 'plain' }, model.testProjects.map((p) => h('li', {}, h('code', { text: p.label }), ` · ${p.kind === 'java' ? 'JUnit 5 + MockMvc' : p.kind === 'php' ? 'PHPUnit feature tests' : `${p.runner} + Supertest`}`)))
       : h('p', { class: 'muted', text: 'No project detected.' });
     const list = h(
       'div',
@@ -1118,7 +1436,7 @@
         persist();
         render();
       }),
-      select('Framework', x.runner, [['auto', 'Detect from project'], ['jest', 'Jest + Supertest'], ['vitest', 'Vitest + Supertest'], ['mocha', 'Mocha + Chai + Supertest'], ['junit', 'JUnit 5 + MockMvc']], (v) => {
+      select('Framework', x.runner, [['auto', 'Detect from project'], ['jest', 'Jest + Supertest'], ['vitest', 'Vitest + Supertest'], ['mocha', 'Mocha + Chai + Supertest'], ['junit', 'JUnit 5 + MockMvc'], ['phpunit', 'PHPUnit (Laravel)']], (v) => {
         x.runner = v;
         persist();
       }),

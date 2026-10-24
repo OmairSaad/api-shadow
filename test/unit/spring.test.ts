@@ -147,7 +147,7 @@ describe('Spring patterns', () => {
 describe('Spring config parsing', () => {
   it('retains only context-path keys', () => {
     const facts = analyzeSpringConfig('server.servlet.context-path=/api\nspring.datasource.password=secret\n', 'application.properties');
-    expect(facts).toEqual({ lang: 'spring-config', contextPath: '/api', servletPath: undefined, issues: [] });
+    expect(facts).toEqual({ lang: 'spring-config', contextPath: '/api', servletPath: undefined, contextLine: 1, issues: [] });
     expect(JSON.stringify(facts)).not.toContain('secret');
   });
 

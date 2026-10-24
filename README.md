@@ -1,6 +1,6 @@
 # API Shadow
 
-**See every HTTP endpoint in your Express, Fastify, Koa, NestJS and Spring Boot projects without running them, and catch the bugs between them.**
+**See every HTTP endpoint in your Express, Fastify, Koa, NestJS, Spring Boot and Laravel projects without running them, and catch the bugs between them.**
 
 API Shadow reads your source code with real parsers and lists every route it finds in a dedicated sidebar. Each entry shows the HTTP method, the full path with all prefixes applied, the controller and handler, middleware and guards, the services it calls, and the exact source line. Click an endpoint to jump straight to it.
 
@@ -20,15 +20,17 @@ API Shadow also connects the dots across your codebase:
 
 Everything runs locally. There are no accounts, servers, telemetry or AI services, and your code never leaves your machine.
 
-![The API Shadow sidebar listing endpoints from Express, NestJS and Spring projects. An expanded NestJS endpoint shows its handler, guards, linked service, request body type, global prefix and API version, next to the controller source.](media/overview.png)
+![The API Shadow sidebar listing endpoints from Express, NestJS and Spring projects. An expanded NestJS endpoint shows how its path is built (global prefix, API version and controller path, each with its file and line), its guards and handler, next to the controller source.](media/overview.png)
 
 ## See it in action
+
+![Animated demo of the dashboard: opening it from the status bar, the overview with API at a glance, searching the API Explorer, opening a step of "How this path is built" in the editor, the API map opening where /admin is mounted, and the dependency graph.](media/dashboard.gif)
 
 ![Animated demo: filtering endpoints by text, jumping to a controller, expanding endpoint details, following a service link, filtering by HTTP method and searching for an endpoint.](media/demo.gif)
 
 ## Getting started
 
-1. Install API Shadow and open a folder that contains an Express, NestJS or Spring Boot project. Monorepos with several projects (or several Maven/Gradle modules) are supported.
+1. Install API Shadow and open a folder that contains an Express, Fastify, Koa, NestJS, Spring Boot or Laravel project. Monorepos with several projects (or several Maven/Gradle modules or Composer projects) are supported.
 2. Click the **API Shadow** icon in the Activity Bar. Analysis starts automatically and usually takes a second or two.
 3. Click an endpoint to open its declaration. Expand it to see the handler, middleware, services and how its path was built.
 
@@ -42,9 +44,17 @@ The status bar shows the endpoint count and any potential duplicate routes. Clic
 
 - **Overview**: endpoint counts by method and framework, matched and unmatched frontend requests, potentially unused routes, potential breaking changes, security findings, and how much of the analysis is certain.
 - **API Explorer**: a searchable inventory filtered by method, framework, callers, auth and confidence. Select an endpoint to see its parameters, inferred response, middleware, services, frontend callers (with the fields they read) and tests. A *Frontend requests* view lists every request with its matched route, and *Coverage findings* lists unmatched requests, potentially unused routes, dynamic routes that need a review, duplicate candidates and unreachable routes.
+- **Where it is mounted**: a *Mounted at* column, and in the details *How this path is built*: every mount, prefix, group and context path in order. Each one opens the line that declares it.
+- **API map**: the API as a tree of path prefixes, with endpoint counts, methods and every place a prefix is mounted.
 - **Impact Analysis**, **Security**, **Dependency Graph**, **Contracts** and **Test Generator**, described below.
 
 The dashboard follows your theme, works with the keyboard, and only shows data from the analysis of your workspace.
+
+![The dashboard overview: endpoint counts by method, matched and unmatched frontend requests, potentially unused routes, breaking changes and security findings, with API at a glance below.](media/dashboard.png)
+
+![The API Explorer with POST /api/v1/users selected. The details show actions, and How this path is built lists the global prefix and URI version from main.ts and the @Controller path, each with its file and line.](media/dashboard-endpoint.png)
+
+![The API map: path prefixes such as /admin and /api with their endpoint counts and methods, and where each is mounted, for example express-app/src/app.js:17.](media/dashboard-api-map.png)
 
 ### Change impact: what breaks if this API changes
 
@@ -106,14 +116,13 @@ Every finding has a rule id, severity, confidence, evidence, an explanation and 
 
 - **Node**: Jest, Vitest or Mocha (detected from `package.json`) with Supertest. The app module is found automatically (`module.exports = app`); NestJS tests bootstrap `AppModule`, Fastify tests wait for `app.ready()`.
 - **Spring**: JUnit 5 with `@WebMvcTest` and MockMvc, with `@MockitoBean` (Spring Boot 3.4+) or `@MockBean` fields for the controller's services.
+- **Laravel**: PHPUnit feature tests in `tests/Feature` (`$this->getJson(...)`, `assertJsonStructure`, `assertNotFound`, `assertUnprocessable` for validated bodies, `assertUnauthorized`), with `Sanctum::actingAs()` for routes behind `auth:sanctum`.
 
 Expectations are only written where the code supports them: a 404 test only if the handler sends 404, response properties from the inferred shape, auth tests only for endpoints with detected auth. Anything else is a `TODO` or a pending test (`it.todo`), so a generated file never passes by accident. The files are previewed first and only written when you confirm; existing files are never overwritten, and tests are never run for you. Missing setup (no runner, no Supertest, an app that isn't exported) is listed before you create them.
 
 ### Every endpoint, with its real path
 
 API Shadow follows the code to work out the URL a request actually hits. That includes Express mount prefixes through nested routers across files, NestJS global prefixes, URI versioning and `RouterModule`, and Spring class and method mappings, constants and `server.servlet.context-path`. Path constants imported from other files (`router.get(ROUTES.USERS)`, `` `${API}/orders` ``, enums, `module.exports = { ... }`) are resolved too. Paths that depend on runtime values are marked **dynamic** instead of guessed.
-
-![An Express endpoint expanded in the sidebar, showing its handler in the controller module, the middleware chain from the app and the mount, the service it calls, and a potential duplicate route warning.](media/express.png)
 
 ### Catch routes that can never run
 
@@ -143,8 +152,6 @@ API Shadow finds HTTP calls in your frontend and test code: `fetch`, axios (incl
 
 **API Shadow: Compare API with Branch or Tag…** analyzes any branch, tag or commit (without checking it out) and compares it with your working tree. You get a report of added, removed and changed endpoints. **Breaking changes** are flagged: removed routes, new required parameters, changed body types and newly required auth. Removed auth is marked 🔓. Paste the report into your pull request.
 
-![An API diff report from main to the working tree: 2 added, 2 removed, 2 changed, 2 breaking. Removed routes are listed under a breaking heading, and auth removed from admin routes is marked with an open lock.](media/diff.png)
-
 ### Request flow
 
 **Show Request Flow** draws the path a request takes: who calls it, how it's mounted, every middleware and guard in order, auth, body validation, the handler and the services it calls. Click any step to open it.
@@ -167,8 +174,6 @@ Click **Try it** to open a ready-to-send request beside the code, in the `.http`
 
 API Shadow never sends requests itself. Sending is up to REST Client, cURL or another tool, when you choose.
 
-![A NestJS controller with a CodeLens above each handler showing its path, guards, Try it and cURL. Next to it, the .http request opened by Try it, with the base URL, a bearer token variable and a JSON body.](media/requests.png)
-
 ### Find endpoints without auth
 
 API Shadow recognises auth middleware, guards and security annotations: `requireAuth`, `passport.authenticate()`, `expressjwt()`, `@UseGuards(JwtAuthGuard)`, global guards (`APP_GUARD`, `app.useGlobalGuards()`), `@PreAuthorize`, `@Secured` and `@RolesAllowed`. It also recognises explicit opt-outs such as `@Public()` and `@PermitAll`. Every endpoint shows its auth in the sidebar and in its CodeLens.
@@ -177,25 +182,18 @@ When a project uses auth, write endpoints (POST, PUT, PATCH, DELETE) and admin o
 
 With a Spring Security filter chain (`SecurityFilterChain`, `@EnableWebSecurity`), endpoints show where security is configured, because per-path rules in it aren't analyzed.
 
-![The sidebar filtered to admin endpoints. An Express route shows "Auth: authenticate, requireAdmin"; a NestJS admin endpoint shows the warning "Auth: none found", and its CodeLens in the editor reads "No auth found".](media/auth.png)
-
 ### Handlers, middleware and services
 
 - **Express**: app-level, mount-level, router-level and per-route middleware in the order they run; handlers in controller modules and classes; service calls.
 - **NestJS**: `@UseGuards`, `@UseInterceptors`, `@UsePipes` and `@UseFilters`; `@Param`, `@Query`, `@Headers` and `@Body` parameters; services injected through the constructor.
 - **Spring Boot**: `@PreAuthorize`, `@Secured` and `@RolesAllowed`; `@PathVariable`, `@RequestParam`, `@RequestHeader` and `@RequestBody`; services in `@Autowired` or constructor-injected fields; mappings inherited from interfaces.
+- **Laravel**: route and group middleware in order; controller methods (also inherited); FormRequest parameters; services injected through the constructor and the models they query.
 
 Each linked service and handler opens its declaration with a single click.
-
-![A Spring Boot endpoint expanded in the sidebar, showing its security annotation, linked service method, request body type and the context path from application.properties, next to the controller source.](media/spring.png)
 
 ### Search, filter and group
 
 Find any endpoint with **Ctrl+T** (Go to Symbol in Workspace): type `GET /users` or just `users`. **API Shadow: Search Endpoints** works the same way. Narrow the tree by text or by HTTP method. Group it by controller, file, HTTP method, framework or first path segment.
-
-![The Search API Endpoints quick pick matching "users" across NestJS and Express endpoints, with handler names and source files.](media/search.png)
-
-![The HTTP method filter with DELETE selected. The sidebar shows only DELETE endpoints from all three frameworks, with the filtered count in the view header.](media/filter.png)
 
 ### Request body validation
 
@@ -207,15 +205,11 @@ API Shadow flags potential duplicate routes: the same method and path within one
 
 The Issues view also lists what could not be analyzed (syntax errors, unresolved modules, unsupported files), each linked to its source line, so you know exactly what the tree does and doesn't cover.
 
-![The Issues view listing potential duplicate routes and an analysis limitation, with the duplicate warnings and their related locations shown in the Problems panel.](media/issues.png)
-
 ### Export to Markdown, OpenAPI 3.0 and .http
 
 **API Shadow: Export Analysis Report** writes one Markdown report with the overview, change impact, coverage findings, security findings and the endpoint inventory.
 
 Export everything to a Markdown report, to an **OpenAPI 3.0** document, or to a `.http` request collection. The OpenAPI export contains only what was found in code; request and response schemas are never invented. Endpoints OpenAPI can't represent exactly are listed under `x-api-shadow.skipped` with the reason, rather than approximated.
-
-![A Markdown export of all endpoints rendered in VS Code's Markdown preview, with a table per controller listing method, path, handler, middleware, services and source location.](media/export.png)
 
 ### Stays up to date
 
@@ -285,6 +279,20 @@ Decorators are recognized only when imported from `@nestjs/*` (aliases are suppo
 | Security | `@PreAuthorize`, `@PostAuthorize`, `@Secured`, `@RolesAllowed`, `@PermitAll`, `@DenyAll` |
 | Services | calls on `@Autowired` or constructor-injected fields |
 
+### Laravel (PHP)
+
+| Pattern | Example |
+|---|---|
+| Routes | `Route::get/post/put/patch/delete/options/any('/uri', …)`, `Route::match(['get', 'post'], …)`, `Route::view()`, `Route::redirect()`, `Route::fallback()` |
+| Actions | `[ArticleController::class, 'show']`, invokable `SearchController::class`, `'ArticleController@show'`, closures, `Route::controller(X::class)->group()` with method names |
+| Resources | `Route::resource()`, `apiResource()`, `resources()`, `apiResources()`, `singleton()`, with `only`/`except`, `parameters`, `names`, nested `photos.comments`; parameters named the way Laravel does (`categories` → `{category}`) |
+| Groups | `Route::group(['prefix' => …, 'middleware' => …, 'as' => …], fn () => …)` and fluent `Route::prefix()->middleware()->name()->group()`, nested |
+| Route files | Laravel 11 `withRouting(api:, web:, apiPrefix:, health:)` in `bootstrap/app.php`; `->group(base_path('routes/…'))` in service providers; `require __DIR__.'/auth.php'`; otherwise `routes/api.php` gets `/api` and the `api` group and `routes/web.php` the `web` group |
+| Middleware and auth | route and group middleware, `->withoutMiddleware()`, `->can()`; `auth`, `auth:sanctum` and `can:` count as auth |
+| Controllers | found through `use` imports (or by class name), parent classes; FormRequest parameters and `$request->validate()` as validation; route model binding (`show(Article $article)`, 404 when missing); constructor-injected services |
+| Responses | `response()->json([...], 201)`, returned arrays, `response()->noContent()`, `abort(404)`, `findOrFail()` |
+| Tests | `$this->getJson('/api/…')` and the other HTTP test helpers in feature tests count as test coverage |
+
 ## Known limitations
 
 API Shadow reports what it can prove from the code. When something can't be resolved, it says so in the Issues view instead of guessing.
@@ -293,7 +301,8 @@ API Shadow reports what it can prove from the code. When something can't be reso
 - **Express**: routers passed through arbitrary data structures or dependency-injection containers, dynamic `require` paths and routes registered in loops are not followed. Relative imports, `tsconfig.json`/`jsconfig.json` `paths` and `baseUrl` (from the nearest config; `extends` isn't followed) and the `@/` → `src/` convention are resolved; `package.json` `#imports` and bundler-only aliases (Vite, webpack) aren't.
 - **NestJS**: middleware configured with `consumer.apply(...).forRoutes(...)` and controllers registered by dynamic modules at runtime aren't shown. One `setGlobalPrefix` per project is used.
 - **Spring**: Kotlin controllers are **not supported** (they're reported in the Issues view). Profile-specific configuration (`application-<profile>.yml`), `${...}` placeholders, custom composed mapping annotations, functional routing (`RouterFunction`) and Spring Data REST repositories aren't analyzed.
-- **Other frameworks** (Hapi, Micronaut, JAX-RS, …) aren't supported yet.
+- **Laravel**: only what route files declare is read; routes registered by packages (in `vendor/`), `Route::macro()`, routes built in loops and `php artisan route:cache` output aren't seen. Constrained parameters (`->where()`) are shown but not used for unreachable-route checks. API Resources (`JsonResource`) and Eloquent models returned from controllers are *unknown* response shapes. Blade views and Livewire aren't analyzed. Laravel's rules for singular parameter names are approximated for irregular words (`children`, `people`).
+- **Other frameworks** (Hapi, Micronaut, JAX-RS, Symfony, …) aren't supported yet.
 - **Response shapes** are inferred from literals, local constants and declared types. Values from databases, other functions or generic wrappers are *unknown*, and API Shadow only reports a missing or removed field when the object is fully known (no spreads or unknown parts). TypeScript interfaces are read from the file that declares them; types from packages and complex generics aren't resolved.
 - **Response reads** are followed within a function, into functions that return the response (also across files, through relative imports and path aliases), React `useState` and react-query. Data passed to child components as props, stores (Redux, Pinia), Angular services injected with `this.service`, and service modules imported through custom alias prefixes other than `@/`, `~/` and `#/` (e.g. `@app/…`) aren't followed.
 - **Security Radar** findings are heuristics from syntax. They don't prove a vulnerability, and they can't prove an endpoint is safe: authorization in custom wrappers, gateways or database policies isn't visible.
@@ -345,7 +354,7 @@ Right-click an endpoint for *Go to Handler*, *Open as HTTP Request*, *Show Reque
 
 | Setting | Default | Description |
 |---|---|---|
-| `apiShadow.frameworks` | all | Frameworks to detect: `express`, `fastify`, `koa`, `nestjs`, `spring` |
+| `apiShadow.frameworks` | all | Frameworks to detect: `express`, `fastify`, `koa`, `nestjs`, `spring`, `laravel` |
 | `apiShadow.exclude` | `[]` | Extra glob patterns to exclude |
 | `apiShadow.includeTestFiles` | `false` | Show routes declared in test files (`*.spec.*`, `*.test.*`, `__tests__/`, `test/`, `src/test/`) as endpoints |
 | `apiShadow.respectFilesExclude` | `true` | Skip files matched by `files.exclude` |
@@ -386,7 +395,7 @@ Right-click an endpoint for *Go to Handler*, *Open as HTTP Request*, *Show Reque
 | `apiShadow.graph.maxEndpoints` | `150` | Maximum endpoints drawn in the dependency graph |
 | `apiShadow.testGeneration.directory` | `""` | Folder for generated tests, relative to the project root |
 
-`node_modules`, `.git`, `dist`, `out`, `build`, `target`, `coverage`, `.next`, `.gradle` and similar folders are always excluded.
+`node_modules`, `vendor`, `.git`, `dist`, `out`, `build`, `target`, `coverage`, `.next`, `.gradle` and similar folders are always excluded.
 
 ## Privacy and security
 

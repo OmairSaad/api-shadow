@@ -123,7 +123,7 @@ export const SECURITY_RULES: Record<SecurityRuleId, SecurityRule> = {
 const SENSITIVE_FIELD = /^(password|passwd|pwd|password_?hash|hashed_?password|pass_?hash|salt|secret|client_?secret|api_?key|private_?key|ssn|social_?security_?number|credit_?card(_?number)?|card_?number|cvv|cvc|pin|otp|mfa_?secret|totp_?secret|reset_?token|verification_?token|access_?token|refresh_?token|session_?token)$/i;
 const TOKEN_FIELD = /token$/i;
 const AUTH_PATH = /(login|signin|sign-in|token|auth|refresh|register|signup|sign-up|oauth|session|password\/reset|verify)/i;
-const OWNERSHIP_MIDDLEWARE = /(owner|permission|authori[sz]e|can[A-Z_]|policy|role|admin|acl|ability|rbac|scope|guard|isSelf|checkAccess)/i;
+const OWNERSHIP_MIDDLEWARE = /(owner|permission|authori[sz]e|can[A-Z_]|^can:|policy|role|admin|acl|ability|rbac|scope|guard|isSelf|checkAccess)/i;
 const ID_PARAM = /(^|[_-])id$|Id$|^(slug|uuid|key)$/;
 
 export function analyzeSecurity(endpoints: Endpoint[], issues: AnalysisIssue[], files: FileRisks[], options: SecurityOptions): SecurityFinding[] {

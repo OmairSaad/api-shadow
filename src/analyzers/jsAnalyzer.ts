@@ -104,6 +104,12 @@ type Binding =
   | { kind: 'const'; expr: PathExpr }
   | { kind: 'shadow' };
 
+/** The HTTP method a constant names (`'POST'`, `'delete'`), if it is one. */
+function verbOf(expr: PathExpr | undefined): HttpMethod | undefined {
+  const part = expr?.parts.length === 1 ? expr.parts[0] : undefined;
+  return part && 'lit' in part ? own(HTTP_VERBS, part.lit.toLowerCase()) : undefined;
+}
+
 class Scope {
   private readonly bindings = new Map<string, Binding>();
   constructor(readonly parent?: Scope) {}
@@ -1693,7 +1699,7 @@ class JsAnalyzer {
         const url = this.objectProp(first, 'url');
         return url ? this.recordClientCall(client, this.methodFrom(this.objectProp(first, 'method')), url, node, scope, false) : false;
       }
-      return this.recordClientCall(client, this.methodFrom(this.objectProp(args[1], 'method')) ?? (this.objectProp(args[1], 'method') ? undefined : 'GET'), args[0], node, scope, false);
+      return this.recordClientCall(client, this.fetchMethod(args[1], scope), args[0], node, scope, false);
     }
     if (callee.type !== 'MemberExpression' && callee.type !== 'OptionalMemberExpression') return false;
     const prop = propName(callee);
@@ -1743,11 +1749,30 @@ class JsAnalyzer {
     return u.type === 'MemberExpression' && !/(data|body|payload|params|config|options)$/i.test(propName(u) ?? '');
   }
 
-  private methodFrom(node: Node | undefined): HttpMethod | undefined {
+  private methodFrom(node: Node | undefined, scope?: Scope): HttpMethod | undefined {
     if (!node) return undefined;
     const u = unwrap(node);
-    const text = u.type === 'StringLiteral' ? u.value : undefined;
-    return text ? HTTP_VERBS[text.toLowerCase()] : undefined;
+    if (u.type === 'StringLiteral') return verbOf({ parts: [{ lit: u.value }] });
+    return scope && u.type === 'Identifier' ? verbOf(this.constPath(u, scope)) : undefined;
+  }
+
+  /**
+   * The method of `fetch(url, options)`: GET without options, otherwise `options.method`, also when
+   * `options` is a local object (`const requestOptions = { method: 'POST' }`). Undefined (any
+   * method) when the options can't be read.
+   */
+  private fetchMethod(options: Node | undefined, scope: Scope): HttpMethod | undefined {
+    if (!options) return 'GET';
+    const n = unwrap(options);
+    if (n.type === 'ObjectExpression') {
+      const method = this.objectProp(n, 'method');
+      return method ? this.methodFrom(method, scope) : 'GET';
+    }
+    if (n.type !== 'Identifier') return undefined;
+    const method = scope.get(`${n.name}.method`);
+    if (method?.kind === 'const') return verbOf(method.expr);
+    // A local object literal without `method`; anything else (a parameter, a call result) is unknown.
+    return scope.constsUnder(n.name).size > 0 ? 'GET' : undefined;
   }
 
   private recordClientCall(client: string, method: HttpMethod | undefined, urlNode: Node, call: Node, scope: Scope, unknownBase: boolean, base?: PathExpr): boolean {

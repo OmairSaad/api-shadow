@@ -55,9 +55,29 @@ export class EndpointCodeLensProvider implements vscode.CodeLensProvider, vscode
     if (!this.isEnabled() || document.uri.scheme !== 'file') return [];
     const lenses: vscode.CodeLens[] = this.clientCallLenses(document);
     const endpoints = this.byFile.get(document.uri.fsPath) ?? [];
+    // Resource declarations (`Route::apiResource(...)`) put many endpoints on one line: summarize them.
+    const perLine = new Map<number, Endpoint[]>();
     for (const e of endpoints) {
       const line = this.lineFor(document, e);
-      if (line === undefined) continue;
+      if (line !== undefined) perLine.set(line, [...(perLine.get(line) ?? []), e]);
+    }
+    for (const [line, group] of perLine) {
+      if (group.length <= 2) continue;
+      const range = new vscode.Range(line, 0, line, 0);
+      const methods = [...new Set(group.map((e) => e.method))].join(', ');
+      lenses.push(new vscode.CodeLens(range, { title: `$(list-unordered) ${group.length} routes: ${methods}`, tooltip: group.map((e) => `${e.method} ${e.path}`).join('\n'), command: 'apiShadow.endpointActions', arguments: [group] }));
+      const auth = new Set(group.map((e) => e.auth?.status ?? 'none'));
+      if (auth.size === 1 && auth.has('protected')) lenses.push(new vscode.CodeLens(range, { title: `$(shield) ${authLabel(group[0].auth!)}`, tooltip: `Auth: ${group[0].auth!.via.join(', ')}`, command: '' }));
+      else if (group.some((e) => this.noAuthIds.has(e.id))) lenses.push(new vscode.CodeLens(range, { title: '$(warning) No auth found', tooltip: 'Some of these routes have no auth middleware, guard or annotation.', command: 'apiShadow.issues.focus' }));
+      const flagged = group.filter((e) => this.unreachable.has(e.id) || this.duplicateIds.has(e.id) || this.noValidationIds.has(e.id)).length;
+      if (flagged) lenses.push(new vscode.CodeLens(range, { title: `$(warning) ${plural(flagged, 'route')} with issues`, tooltip: 'Unreachable, duplicate or unvalidated routes. See the Issues view.', command: 'apiShadow.issues.focus' }));
+      const calls = group.reduce((n, e) => n + (e.usage?.calls ?? 0), 0);
+      const tests = group.reduce((n, e) => n + (e.usage?.tests ?? 0), 0);
+      if (this.hasCalls || calls + tests > 0) lenses.push(new vscode.CodeLens(range, { title: calls + tests ? `$(references) ${[calls ? plural(calls, 'caller') : '', tests ? plural(tests, 'test') : ''].filter(Boolean).join(' · ')}` : '$(circle-slash) No callers', command: '' }));
+    }
+    for (const e of endpoints) {
+      const line = this.lineFor(document, e);
+      if (line === undefined || (perLine.get(line)?.length ?? 0) > 2) continue;
       const range = new vscode.Range(line, 0, line, 0);
       const add = (title: string, tooltip: string, command = '', args: unknown[] = []): void => {
         lenses.push(new vscode.CodeLens(range, { title, tooltip, command, arguments: args }));

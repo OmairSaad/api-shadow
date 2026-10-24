@@ -14,6 +14,8 @@ const UNTYPED_BODY = new Set(['object', 'any', 'unknown', 'Record', 'Object']);
 
 export function acceptsBody(e: Endpoint): boolean {
   if (e.framework === 'nestjs' || e.framework === 'spring') return !!e.requestBodyType;
+  // Laravel handlers read input explicitly (`$request->input()`, a FormRequest).
+  if (e.framework === 'laravel') return BODY_METHODS.has(e.method) && (!!e.requestBodyType || !!e.readsBody || e.validation?.status === 'validated');
   return BODY_METHODS.has(e.method) || !!e.requestBodyType;
 }
 

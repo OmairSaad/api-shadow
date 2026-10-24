@@ -111,8 +111,9 @@ export function registerCommands(deps: CommandDeps): void {
     return doc;
   });
 
-  reg('apiShadow.endpointActions', async (target?: EndpointTreeNode | Endpoint) => {
-    const e = endpointOf(target);
+  reg('apiShadow.endpointActions', async (target?: EndpointTreeNode | Endpoint | Endpoint[]) => {
+    // Several endpoints declared on one line (a resource route): choose one first.
+    const e = Array.isArray(target) ? await pickEndpoint(target.filter((x) => endpointOf(x)), 'Routes declared here') : endpointOf(target);
     if (!e) return;
     const actions: (vscode.QuickPickItem & { run: () => unknown })[] = [
       { label: '$(play) Try It', description: 'open a ready-to-send .http request', run: () => vscode.commands.executeCommand('apiShadow.openRequest', e) },

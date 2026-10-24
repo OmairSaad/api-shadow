@@ -62,10 +62,10 @@ describe('API Shadow extension (Extension Development Host)', function () {
     await vscode.commands.executeCommand('apiShadow.groupBy', 'controller');
   });
 
-  it('activates automatically and discovers endpoints for all three frameworks', function () {
+  it('activates automatically and discovers endpoints for all four frameworks', function () {
     const result = api.getResult()!;
     const frameworks = new Set(result.endpoints.map((e) => e.framework));
-    assert.deepStrictEqual([...frameworks].sort(), ['express', 'nestjs', 'spring']);
+    assert.deepStrictEqual([...frameworks].sort(), ['express', 'laravel', 'nestjs', 'spring']);
     const paths = result.endpoints.map((e) => `${e.method} ${e.path}`);
     for (const expected of ['GET /users/:id', 'POST /api/v1/users', 'GET /shop/api/orders/{orderId}']) {
       assert.ok(paths.includes(expected), `missing ${expected}`);
@@ -170,7 +170,7 @@ describe('API Shadow extension (Extension Development Host)', function () {
     } finally {
       await config.update('frameworks', undefined, vscode.ConfigurationTarget.Workspace);
     }
-    await waitForResult(api, (x) => new Set(x.endpoints.map((e) => e.framework)).size === 3);
+    await waitForResult(api, (x) => new Set(x.endpoints.map((e) => e.framework)).size === 4);
   });
 
   it('shows CodeLens with method, path, auth and request actions above endpoints', async function () {
@@ -219,7 +219,7 @@ describe('API Shadow extension (Extension Development Host)', function () {
     const text = fs.readFileSync(target.fsPath, 'utf8');
     assert.match(text, /^@baseUrl = http:\/\/localhost:\d+$/m);
     assert.strictEqual((text.match(/^### /gm) ?? []).length, api.getResult()!.endpoints.length);
-    assert.ok(text.includes('GET {{baseUrl2}}/shop/api/orders/{{orderId}}') || text.includes('GET {{baseUrl}}/shop/api/orders/{{orderId}}'), text);
+    assert.match(text, /^GET \{\{baseUrl\d*\}\}\/shop\/api\/orders\/\{\{orderId\}\}$/m);
   });
 
   it('shows auth in the tree and lists endpoints without auth in the Issues view', function () {

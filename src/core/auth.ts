@@ -43,6 +43,8 @@ export const DEFAULT_AUTH_PATTERNS: readonly string[] = [
   'Secured',
   'RolesAllowed',
   'DenyAll',
+  // Laravel authorization middleware (`can:update,post`).
+  '^can:',
 ];
 
 export const DEFAULT_PUBLIC_PATTERNS: readonly string[] = ['@Public\\b', '@(Allow)?Anonymous\\b', '@(Skip|No)Auth\\b', '@IsPublic\\b', 'PermitAll', 'permitAll\\(\\)', 'isAnonymous\\(\\)'];

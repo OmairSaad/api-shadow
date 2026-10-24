@@ -17,7 +17,7 @@ export interface Registration {
 }
 
 /** Frameworks that try routes in registration order and stop at the first match. */
-const ORDERED = new Set(['express', 'koa', 'nestjs']);
+const ORDERED = new Set(['express', 'koa', 'nestjs', 'laravel']);
 
 /**
  * Reports routes that can never run because a route registered earlier on the same router

@@ -5,9 +5,9 @@ import type { SecurityFinding } from './security';
  * is free of `vscode` imports so it can be unit-tested in plain Node.
  */
 
-export type Framework = 'express' | 'fastify' | 'koa' | 'nestjs' | 'spring';
+export type Framework = 'express' | 'fastify' | 'koa' | 'nestjs' | 'spring' | 'laravel';
 
-export const FRAMEWORKS: readonly Framework[] = ['express', 'fastify', 'koa', 'nestjs', 'spring'];
+export const FRAMEWORKS: readonly Framework[] = ['express', 'fastify', 'koa', 'nestjs', 'spring', 'laravel'];
 
 /** `ALL` means the route matches every HTTP method (Express `all`, Nest `@All`, Spring mapping without `method`). */
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD' | 'ALL';
@@ -111,6 +111,14 @@ export interface EndpointRisk {
   location: SourceLocation;
 }
 
+/** One step of how an endpoint's path is built: a mount, prefix, group or loaded route file. */
+export interface TraceStep {
+  /** `Mounted at "/api"`, `Global prefix "api"`, `Group prefix "admin"`. */
+  text: string;
+  /** Where the step is declared, when known. */
+  location?: SourceLocation;
+}
+
 /** How sure the analysis is about an endpoint's method and path. */
 export type Confidence = 'high' | 'medium' | 'low';
 
@@ -181,12 +189,16 @@ export interface Endpoint {
   conditions?: string[];
   /** Human-readable analysis notes (where a prefix came from, heuristics applied, ...). */
   notes: string[];
+  /** How the path is built, outermost first, with the location of each step. */
+  trace?: TraceStep[];
   /** Responses inferred from handler code; see {@link EndpointResponse}. */
   responses?: EndpointResponse[];
   /** Data access calls in the handler (`User.findById`, `userRepository.save`). */
   dataAccess?: string[];
   /** Security evidence from the handler body; turned into findings by `core/security.ts`. */
   risks?: EndpointRisk[];
+  /** The handler reads request input (Laravel); endpoints that read none accept no body. */
+  readsBody?: boolean;
   /** The handler reads the authenticated user / passes a path parameter to data access. */
   ownership?: { readsUser: boolean; paramIdToData: boolean };
   /** How certain the method and path are: `low` for unresolved expressions, `medium` for unmounted routers. */

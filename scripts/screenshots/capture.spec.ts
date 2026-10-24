@@ -1,5 +1,6 @@
 /**
- * Produces the images shown on the Marketplace details page (media/*.png, media/demo.gif).
+ * Produces the images shown on the Marketplace details page (media/*.png, media/demo.gif,
+ * media/dashboard.gif).
  *
  * VS Code is launched with the packaged VSIX installed (no development banner), a demo copy of the
  * fixture workspace, and settings that keep the UI free of unrelated noise. Screenshots are taken
@@ -48,7 +49,7 @@ function prepareDemoWorkspace(workspace: string): void {
   fs.rmSync(path.join(workspace, 'express-app/src/routes/broken.js'), { force: true });
   fs.rmSync(path.join(workspace, 'spring-app/src/main/java/com/example/shop/controller/BrokenController.java'), { force: true });
   fs.rmSync(path.join(workspace, 'express-app/node_modules'), { recursive: true, force: true });
-  // A git history for the API diff screenshot.
+  // A git history, so the dashboard's impact analysis has a baseline.
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Demo', GIT_AUTHOR_EMAIL: 'demo@example.com', GIT_COMMITTER_NAME: 'Demo', GIT_COMMITTER_EMAIL: 'demo@example.com' };
   for (const args of [['init', '-q', '-b', 'main'], ['add', '.'], ['commit', '-q', '-m', 'Initial API']]) execFileSync('git', args, { cwd: workspace, env });
 }
@@ -92,14 +93,6 @@ async function setPaneExpanded(page: Page, title: 'Endpoints' | 'Issues', expand
 async function expandRow(row: Locator): Promise<void> {
   if ((await row.getAttribute('aria-expanded')) === 'false') await row.locator('.monaco-tl-twistie').click();
   await expect(row).toHaveAttribute('aria-expanded', 'true');
-}
-
-async function expandAllGroups(page: Page): Promise<void> {
-  for (let i = 0; i < 40; i++) {
-    const collapsed = endpointsTree(page).locator('.monaco-list-row[aria-level="1"][aria-expanded="false"]').first();
-    if ((await collapsed.count()) === 0) return;
-    await collapsed.locator('.monaco-tl-twistie').click();
-  }
 }
 
 /** Drags the sash between the side bar and the editor so labels are not truncated. */
@@ -161,122 +154,21 @@ test('marketplace screenshots', async () => {
   try {
     await openApiShadow(page);
 
-    // 1. Overview: NestJS controller endpoint with guards, service link, body type and prefixes.
+    // 1. Overview: a NestJS endpoint with how its path is built (each step opens), guards and handler.
     await viewAction(page, 'Collapse All').click();
     await expandRow(endpoint(page, /^UsersController, 5 endpoints/));
     const create = endpoint(page, /^POST \/api\/v1\/users, NestJS/);
     await create.click();
     await activeTab(page, 'users.controller.ts');
     await expandRow(create);
-    await expect(endpoint(page, /→ UsersService\.create/)).toBeVisible();
+    await expect(endpoint(page, /^Global prefix "api"/)).toBeVisible();
     // Show the file from the top (decorators included); line 22 stays in view.
     const editor = (await page.locator('.editor-group-container .monaco-editor .view-lines').first().boundingBox())!;
     await page.mouse.move(editor.x + editor.width / 2, editor.y + editor.height / 2);
     await page.mouse.wheel(0, -3000);
     await shot(page, 'overview');
 
-    // 2. Express: nested routers, middleware chain, controller module and service, duplicate warning.
-    await viewAction(page, 'Collapse All').click();
-    await expandRow(endpoint(page, /^userController, \d+ endpoints/));
-    const getUser = endpoint(page, /^GET \/users\/:id, Express/);
-    await getUser.click();
-    await activeTab(page, 'users.js');
-    await expandRow(getUser);
-    await expect(endpoint(page, /→ userService\.findById/)).toBeVisible();
-    await shot(page, 'express');
-
-    // 3. Spring: constants, context path, security annotation, request body, service.
-    await viewAction(page, 'Collapse All').click();
-    await expandRow(endpoint(page, /^ProductController, \d+ endpoints/));
-    const product = endpoint(page, /^POST \/shop\/api\/v1\/products, Spring/);
-    await product.click();
-    await activeTab(page, 'ProductController.java');
-    await expandRow(product);
-    await expect(endpoint(page, /→ ProductService\.create/)).toBeVisible();
-    await shot(page, 'spring');
-
-    // 4. CodeLens above each handler, and a ready-to-send request opened beside the code.
-    await viewAction(page, 'Collapse All').click();
-    await expandRow(endpoint(page, /^UsersController, 5 endpoints/));
-    await endpoint(page, /^POST \/api\/v1\/users, NestJS/).click();
-    await activeTab(page, 'users.controller.ts');
-    const lens = page.locator('.editor-group-container.active .codelens-decoration').filter({ hasText: 'POST /api/v1/users' });
-    // A reopened file first shows cached lenses as plain text; wait for the live ones.
-    await lens.locator('a[role="button"]', { hasText: 'Try it' }).click();
-    await expect(page.locator('.editor-group-container.active .view-lines')).toContainText('POST {{baseUrl}}/api/v1/users');
-    await runCommand(page, 'Notifications: Clear All Notifications');
-    await shot(page, 'requests');
-    await runCommand(page, 'View: Revert and Close Editor');
-    await expect(page.locator('.editor-group-container')).toHaveCount(1);
-
-    // 5. Auth: admin endpoints without a guard, flagged next to protected ones.
-    await runCommand(page, 'API Shadow: Filter Endpoints by Text');
-    await waitForQuickInput(page, 'Filter API Endpoints');
-    await page.keyboard.type('admin');
-    await page.keyboard.press('Enter');
-    await expect(page.locator('.quick-input-widget')).toBeHidden();
-    await expandAllGroups(page);
-    const stats = endpoint(page, /^GET \/api\/admin\/reports\/stats, NestJS/);
-    await stats.click();
-    await activeTab(page, 'admin.controller.ts');
-    await expandRow(stats);
-    await expandRow(endpoint(page, /^DELETE \/admin\/cache, Express/));
-    await expect(page.locator('.codelens-decoration a', { hasText: 'No auth found' }).first()).toBeVisible();
-    await shot(page, 'auth');
-    await runCommand(page, 'API Shadow: Clear Filters');
-
-    // 6. Search across all endpoints.
-    await runCommand(page, 'API Shadow: Search Endpoints');
-    await waitForQuickInput(page, 'Search API Endpoints');
-    await page.keyboard.type('users');
-    await expect(page.locator('.quick-input-list .monaco-list-row').first()).toContainText('/users');
-    await shot(page, 'search');
-    await page.keyboard.press('Escape');
-
-    // 7. HTTP method filter: show the picker over the filtered tree.
-    await runCommand(page, 'API Shadow: Filter by HTTP Method');
-    await waitForQuickInput(page, 'Filter by HTTP Method');
-    await page.getByRole('checkbox', { name: /^DELETE, \d+ endpoint/ }).click();
-    await page.locator('.quick-input-widget input.input').press('Enter');
-    await expect(page.locator('.quick-input-widget')).toBeHidden();
-    await expandAllGroups(page);
-    await runCommand(page, 'API Shadow: Filter by HTTP Method');
-    await waitForQuickInput(page, 'Filter by HTTP Method');
-    await expect(page.getByRole('checkbox', { name: /^DELETE, \d+ endpoint/ })).toBeChecked();
-    await shot(page, 'filter');
-    await page.keyboard.press('Escape');
-    await runCommand(page, 'API Shadow: Clear Filters');
-
-    // 8. Issues view and Problems panel.
-    await setPaneExpanded(page, 'Endpoints', false);
-    await setPaneExpanded(page, 'Issues', true);
-    const issues = page.locator('.pane').filter({ has: page.locator('.pane-header', { hasText: /Issues/ }) });
-    await expandRow(issues.getByRole('treeitem', { name: /^Analysis limitations, \d+/ }));
-    await issues.getByRole('treeitem', { name: /Potential duplicate route GET \/users\/\{\}/ }).click();
-    await activeTab(page, 'users.js');
-    await runCommand(page, 'View: Toggle Problems');
-    await expect(page.getByRole('tree', { name: /problems/i }).getByRole('treeitem', { name: /Potential duplicate route/ }).first()).toBeVisible();
-    await shot(page, 'issues');
-    await runCommand(page, 'View: Toggle Problems');
-    await setPaneExpanded(page, 'Issues', false);
-    await setPaneExpanded(page, 'Endpoints', true);
-
-    // 9. Markdown export rendered in the built-in preview.
-    const target = path.join(session.workspace, 'API-ENDPOINTS.md');
-    await runCommand(page, 'API Shadow: Export Endpoints to Markdown');
-    await waitForQuickInput(page, /Export API Endpoints/);
-    const input = page.locator('.quick-input-widget input.input');
-    await input.fill(target);
-    await input.press('Enter');
-    await page.locator('.notifications-toasts').getByRole('button', { name: 'Open', exact: true }).click();
-    await activeTab(page, 'API-ENDPOINTS.md');
-    await runCommand(page, 'Markdown: Open Preview');
-    await activeTab(page, 'Preview API-ENDPOINTS.md');
-    await page.waitForTimeout(2000);
-    await shot(page, 'export');
-    await runCommand(page, 'View: Close All Editors');
-
-    // 10. Frontend → backend: CodeLens and hover on a React API client.
+    // 2. Frontend → backend: CodeLens and hover on a React API client.
     await page.keyboard.press('Control+P');
     await page.locator('.quick-input-widget input.input').fill('web-app/src/api/client.ts');
     await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'client.ts' }).first().click();
@@ -293,7 +185,7 @@ test('marketplace screenshots', async () => {
     execFileSync('convert', [path.join(RAW, 'frontend.png'), '-filter', 'Lanczos', '-resize', `${OUTPUT_WIDTH}x`, '-strip', '-define', 'png:compression-level=9', path.join(MEDIA, 'frontend.png')]);
     await page.keyboard.press('Escape');
 
-    // 11. Unreachable route.
+    // 3. Unreachable route.
     await viewAction(page, 'Collapse All').click();
     await expandRow(endpoint(page, /^userController, \d+ endpoints/));
     const me = endpoint(page, /^GET \/users\/me, Express/);
@@ -303,7 +195,7 @@ test('marketplace screenshots', async () => {
     await expect(page.locator('.codelens-decoration a', { hasText: 'Unreachable' })).toBeVisible();
     await shot(page, 'unreachable');
 
-    // 12. Request flow.
+    // 4. Request flow.
     await runCommand(page, 'API Shadow: Show Request Flow');
     await waitForQuickInput(page, 'Show Request Flow');
     await page.locator('.quick-input-widget input.input').fill('POST /api/v1/users');
@@ -312,22 +204,6 @@ test('marketplace screenshots', async () => {
     await page.waitForTimeout(1200);
     await shot(page, 'flow');
     await runCommand(page, 'View: Close All Editors');
-
-    // 13. API diff against main after a few changes.
-    const health = path.join(session.workspace, 'express-app/src/routes/health.js');
-    fs.writeFileSync(health, fs.readFileSync(health, 'utf8').replace("app.get('/health/ready'", "app.get('/health/live', (req, res) => res.json({ live: true }));\n  app.get('/health/readiness'"));
-    const admin = path.join(session.workspace, 'express-app/src/app.js');
-    fs.writeFileSync(admin, fs.readFileSync(admin, 'utf8').replace("app.use('/admin', authenticate, requireAdmin, adminRouter);", "app.use('/admin', adminRouter);"));
-    const orders = path.join(session.workspace, 'express-app/src/routes/orders.js');
-    fs.writeFileSync(orders, fs.readFileSync(orders, 'utf8').replace(/\n[^\n]*\.post\([^\n]*\n/, '\n'));
-    await expect(endpoint(page, /^admin, 2 endpoints/)).toBeVisible();
-    await page.waitForTimeout(2500);
-    await runCommand(page, 'API Shadow: Compare API with Branch or Tag…');
-    await waitForQuickInput(page, 'Compare API With…');
-    await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'main' }).first().click();
-    await expect(page.locator('.tab', { hasText: /Preview/ })).toBeVisible({ timeout: 30000 });
-    await page.waitForTimeout(2000);
-    await shot(page, 'diff');
   } finally {
     await session.close();
   }
@@ -367,17 +243,25 @@ async function installPointer(page: Page): Promise<void> {
       },
       true,
     );
-    document.addEventListener(
-      'mousedown',
-      () => {
+    // Webviews are iframes: their mouse events never reach this document, so the dashboard demo
+    // moves the pointer and shows clicks through these.
+    const w = window as unknown as { __movePointer: (px: number, py: number) => void; __ripple: () => void };
+    w.__movePointer = (px, py) => {
+      x = px;
+      y = py;
+      pointer.style.transform = `translate(${x - 2}px, ${y - 1}px)`;
+    };
+    w.__ripple = () => ripple();
+    document.addEventListener('mousedown', () => ripple(), true);
+    function ripple(): void {
+      {
         const ring = document.createElement('div');
         Object.assign(ring.style, { position: 'fixed', left: `${x - 16}px`, top: `${y - 16}px`, width: '32px', height: '32px', borderRadius: '50%', border: '3px solid #4fc1ff', zIndex: '2147483646', pointerEvents: 'none' });
         document.body.appendChild(ring);
         const animation = ring.animate([{ transform: 'scale(0.3)', opacity: 1 }, { transform: 'scale(1.3)', opacity: 0 }], { duration: 500, easing: 'ease-out' });
         animation.onfinish = () => ring.remove();
-      },
-      true,
-    );
+      }
+    }
   });
 }
 
@@ -499,6 +383,140 @@ test('marketplace demo gif', async () => {
     await cast.stop();
     fs.mkdirSync(MEDIA, { recursive: true });
     cast.toGif(path.join(MEDIA, 'demo.gif'), 2.5);
+  } finally {
+    await session.close();
+  }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Dashboard
+// ---------------------------------------------------------------------------------------------
+
+/** The dashboard's content frame (VS Code nests webviews in two iframes). */
+function dashboardFrame(page: Page) {
+  return page.frameLocator('iframe.webview.ready').frameLocator('#active-frame');
+}
+
+async function openDashboard(page: Page): Promise<ReturnType<typeof dashboardFrame>> {
+  await runCommand(page, 'View: Toggle Primary Side Bar Visibility');
+  await runCommand(page, 'API Shadow: Open Dashboard');
+  const d = dashboardFrame(page);
+  await expect(d.getByRole('heading', { name: /^API Shadow · shop-platform/ })).toBeVisible();
+  return d;
+}
+
+test('dashboard screenshots', async () => {
+  const session = await launch(DEVICE_SCALE);
+  const { page } = session;
+  try {
+    await openApiShadow(page);
+    const d = await openDashboard(page);
+    await expect(d.getByRole('heading', { name: 'API at a glance' })).toBeAttached();
+    await shot(page, 'dashboard');
+
+    // Endpoint details: how the path is built, each step opening its declaration.
+    await d.getByRole('tab', { name: /API Explorer/ }).click();
+    await d.getByRole('searchbox', { name: 'Search endpoints' }).fill('post users');
+    await d.locator('table.grid tbody tr').filter({ hasText: '/api/v1/users' }).first().click();
+    await expect(d.getByRole('heading', { name: 'How this path is built' })).toBeVisible();
+    await shot(page, 'dashboard-endpoint');
+
+    // The API map: every prefix and where it is mounted.
+    await d.getByRole('searchbox', { name: 'Search endpoints' }).fill('');
+    await d.getByRole('button', { name: 'API map' }).click();
+    await expect(d.locator('.map-row').first()).toBeVisible();
+    await shot(page, 'dashboard-api-map');
+  } finally {
+    await session.close();
+  }
+});
+
+test('dashboard demo gif', async () => {
+  const session = await launch(DEVICE_SCALE);
+  const { page } = session;
+  const pause = (ms: number) => page.waitForTimeout(ms);
+  let at = { x: 0, y: 0 };
+  // Moves the real mouse and the drawn pointer together, also over the webview.
+  const glide = async (target: Locator): Promise<{ x: number; y: number }> => {
+    await target.waitFor({ state: 'visible' });
+    await target.scrollIntoViewIfNeeded();
+    const box = (await target.boundingBox())!;
+    const to = { x: box.x + Math.min(box.width / 2, 120), y: box.y + box.height / 2 };
+    const steps = 20;
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const e = t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+      const px = at.x + (to.x - at.x) * e;
+      const py = at.y + (to.y - at.y) * e;
+      await page.mouse.move(px, py);
+      await page.evaluate(([mx, my]) => (window as unknown as { __movePointer: (a: number, b: number) => void }).__movePointer(mx, my), [px, py]);
+    }
+    at = to;
+    await pause(180);
+    return to;
+  };
+  const click = async (target: Locator): Promise<void> => {
+    const { x, y } = await glide(target);
+    await page.evaluate(() => (window as unknown as { __ripple: () => void }).__ripple());
+    await page.mouse.click(x, y);
+  };
+  try {
+    await openApiShadow(page);
+    await page.keyboard.press('Control+P');
+    await page.locator('.quick-input-widget input.input').fill('express-app/src/app.js');
+    await page.locator('.quick-input-list .monaco-list-row').filter({ hasText: 'app.js' }).first().waitFor();
+    await page.keyboard.press('Enter');
+    await activeTab(page, 'app.js');
+    await runCommand(page, 'View: Toggle Primary Side Bar Visibility');
+    await installPointer(page);
+    const size = await viewport(page);
+    at = { x: size.width * 0.55, y: size.height * 0.5 };
+    await page.evaluate(([mx, my]) => (window as unknown as { __movePointer: (a: number, b: number) => void }).__movePointer(mx, my), [at.x, at.y]);
+    const frames = fs.mkdtempSync(path.join(os.tmpdir(), 'api-shadow-dash-gif-'));
+    const cast = new Screencast(await page.context().newCDPSession(page), frames);
+    await cast.start(size);
+    await pause(700);
+
+    // Open the dashboard from the status bar.
+    await click(page.getByRole('button', { name: /^API Shadow: \d+ endpoint\(s\)/ }));
+    const d = dashboardFrame(page);
+    await expect(d.getByRole('heading', { name: /^API Shadow · shop-platform/ })).toBeVisible();
+    await pause(1600);
+    await glide(d.getByRole('heading', { name: 'API at a glance' }));
+    await pause(1200);
+
+    // Find an endpoint and see how its path is built; a step opens its declaration.
+    await click(d.getByRole('tab', { name: /API Explorer/ }));
+    await pause(600);
+    await click(d.getByRole('searchbox', { name: 'Search endpoints' }));
+    await page.keyboard.type('post users', { delay: 110 });
+    await pause(600);
+    await click(d.locator('table.grid tbody tr').filter({ hasText: '/api/v1/users' }).first());
+    await expect(d.getByRole('heading', { name: 'How this path is built' })).toBeVisible();
+    await pause(1500);
+    await click(d.locator('.stepper li.clickable').first());
+    await expect(page.locator('.tab.active', { hasText: 'main.ts' }).first()).toBeVisible();
+    await pause(1600);
+
+    // The API map: every prefix, how many endpoints it has and where it is mounted.
+    await click(d.getByRole('button', { name: 'API map' }));
+    await pause(1500);
+    const admin = d.locator('.map-row.depth-0').filter({ has: d.locator('code', { hasText: /^\/admin$/ }) });
+    await click(admin.getByRole('button', { name: /mounted at/ }).first());
+    await expect(page.locator('.tab.active', { hasText: 'app.js' }).last()).toBeVisible();
+    await pause(1600);
+
+    // The dependency graph, from the component to the handler.
+    await click(d.getByRole('tab', { name: /Dependency Graph/ }));
+    const graph = d.getByRole('application', { name: /API dependency graph/ });
+    await expect(graph).toBeVisible();
+    await pause(900);
+    await click(graph.getByRole('button', { name: 'endpoint: POST /api/v1/users' }));
+    await pause(2200);
+
+    await cast.stop();
+    fs.mkdirSync(MEDIA, { recursive: true });
+    cast.toGif(path.join(MEDIA, 'dashboard.gif'), 2.5);
   } finally {
     await session.close();
   }

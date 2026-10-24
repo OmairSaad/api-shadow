@@ -20,7 +20,7 @@ const METHOD_COLORS: Record<HttpMethod, string> = {
   ALL: 'charts.orange',
 };
 
-export const FRAMEWORK_LABEL: Record<string, string> = { express: 'Express', fastify: 'Fastify', koa: 'Koa', nestjs: 'NestJS', spring: 'Spring' };
+export const FRAMEWORK_LABEL: Record<string, string> = { express: 'Express', fastify: 'Fastify', koa: 'Koa', nestjs: 'NestJS', spring: 'Spring', laravel: 'Laravel' };
 
 export function relativePath(file: string): string {
   return vscode.workspace.asRelativePath(file, (vscode.workspace.workspaceFolders?.length ?? 0) > 1);
@@ -125,6 +125,18 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
         location: blocker?.location,
       });
     }
+    // Where the path comes from: each mount, prefix or group opens at its declaration.
+    (e.trace ?? []).forEach((t, i) => {
+      out.push({
+        type: 'detail',
+        id: `${e.id}:trace:${i}`,
+        label: t.text,
+        description: t.location ? `${path.basename(t.location.file)}:${t.location.line}` : undefined,
+        icon: i === 0 ? 'debug-start' : 'debug-step-into',
+        tooltip: t.location ? `${t.text} — ${relativePath(t.location.file)}:${t.location.line}. Click to open.` : t.text,
+        location: t.location,
+      });
+    });
     if (e.auth) {
       const label = `Auth: ${describeAuth(e.auth)}`;
       out.push({
@@ -202,7 +214,10 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
     if (e.requestBodyType) {
       out.push({ type: 'detail', id: `${e.id}:body`, label: `Body: ${e.requestBodyType}`, icon: 'json' });
     }
-    e.notes.forEach((n, i) => out.push({ type: 'detail', id: `${e.id}:note:${i}`, label: n, icon: 'info' }));
+    // Notes already shown as trace rows are left out.
+    e.notes.forEach((n, i) => {
+      if (!(e.trace ?? []).some((t) => n.startsWith(t.text))) out.push({ type: 'detail', id: `${e.id}:note:${i}`, label: n, icon: 'info' });
+    });
     return out;
   }
 
@@ -239,7 +254,7 @@ export class EndpointTreeProvider implements vscode.TreeDataProvider<EndpointTre
   private endpointItem(e: Endpoint, duplicate: boolean, noAuth: boolean): vscode.TreeItem {
     const label = `${e.method} ${e.path}`;
     const unreachable = this.unreachable.has(e.id);
-    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length > 0 || !!e.handlerLocation || !!e.requestBodyType || !!e.auth || !!e.usage || duplicate;
+    const hasDetails = e.middleware.length + e.services.length + e.notes.length + e.parameters.length + (e.trace?.length ?? 0) > 0 || !!e.handlerLocation || !!e.requestBodyType || !!e.auth || !!e.usage || duplicate;
     const item = new vscode.TreeItem({ label, highlights: [[0, e.method.length]] }, hasDetails ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None);
     item.id = `endpoint:${e.id}`;
     const where = `${path.basename(e.location.file)}:${e.location.line}`;

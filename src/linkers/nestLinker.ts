@@ -6,7 +6,7 @@
  */
 import type { JsFileFacts, NestGlobalGuardFact, NestMethodFact, NestGlobalPrefixFact, NestRouterModuleRoute, NestVersioningFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths, lit } from '../core/paths';
-import type { Endpoint, HttpMethod, PathExpr, ServiceRef, Shape, SourceLocation } from '../core/types';
+import type { Endpoint, HttpMethod, PathExpr, ServiceRef, Shape, SourceLocation, TraceStep } from '../core/types';
 import { bodyFields, endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
@@ -94,26 +94,31 @@ export class NestLinker {
             for (const mPath of method.paths) {
               for (const version of uriVersions) {
                 const notes: string[] = [...guardNotes];
+                const trace: TraceStep[] = [];
                 const routeOnly = joinUrlPaths(exprToDisplay(cPath), exprToDisplay(mPath));
                 const exprs: PathExpr[] = [];
                 const prefix = config.prefix;
                 if (prefix && !this.isExcluded(prefix.fact, routeOnly, method.method)) {
                   exprs.push(prefix.fact.prefix);
                   notes.push(`Global prefix "${exprToDisplay(prefix.fact.prefix)}" from setGlobalPrefix (${shortFile(prefix.file)}:${prefix.fact.pos.line})`);
+                  trace.push({ text: `Global prefix "${exprToDisplay(prefix.fact.prefix)}" from setGlobalPrefix`, location: loc(prefix.file, prefix.fact.pos) });
                 } else if (prefix) {
                   notes.push('Excluded from the global prefix.');
                 }
                 if (version) {
                   exprs.push(lit(version));
                   notes.push(`URI version "${version}"`);
+                  trace.push({ text: `URI version "${version}"`, location: config.versioning ? loc(config.versioning.file, config.versioning.fact.pos) : undefined });
                 } else if (versioning && versioning.type !== 'URI' && versions.length > 0) {
                   notes.push(`Version ${versions.join(', ')} selected via ${versioning.type.toLowerCase().replace('_', ' ')}`);
                 }
                 if (modulePrefix) {
                   exprs.push(lit(modulePrefix));
                   notes.push(`RouterModule prefix "${modulePrefix}" (${modules.join(', ')})`);
+                  trace.push({ text: `RouterModule prefix "${modulePrefix}" (${modules.join(', ')})` });
                 }
                 exprs.push(cPath, mPath);
+                if (joinUrlPaths(exprToDisplay(cPath)) !== '/') trace.push({ text: `@Controller('${exprToDisplay(cPath).replace(/^\//, '')}') on ${controller.className}`, location: loc(file, controller.pos) });
                 const isStatic = exprs.every(isStaticExpr);
                 if (!isStatic) notes.push('Path contains expressions that could not be resolved statically.');
                 const location = loc(file, method.pos);
@@ -136,6 +141,7 @@ export class NestLinker {
                   requestBodyType: method.bodyType,
                   version: versioning && versioning.type !== 'URI' && versions.length > 0 ? versions.join(', ') : undefined,
                   notes,
+                  trace: trace.length ? trace : undefined,
                   projectRoot: root,
                   ...this.bodyOf(file, facts, method),
                 };
