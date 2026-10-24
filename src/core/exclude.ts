@@ -25,11 +25,13 @@ export const DEFAULT_EXCLUDED_DIRS = [
   '.venv',
   'venv',
   '__pycache__',
+  // Composer dependencies (the Laravel framework itself registers routes).
+  'vendor',
 ];
 
-export const SOURCE_GLOB = '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java,kt}';
+export const SOURCE_GLOB = '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java,kt,php}';
 export const CONFIG_GLOB = '**/application.{properties,yml,yaml}';
-export const MARKER_GLOB = '**/{package.json,pom.xml,build.gradle,build.gradle.kts}';
+export const MARKER_GLOB = '**/{package.json,pom.xml,build.gradle,build.gradle.kts,composer.json}';
 /** TypeScript/JavaScript project configs, read for module path aliases (`@/…`). */
 export const TSCONFIG_GLOB = '**/{tsconfig,jsconfig}.json';
 

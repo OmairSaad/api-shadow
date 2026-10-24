@@ -29,6 +29,8 @@ export function analyzeSpringConfig(source: string, filePath: string): SpringCon
   const values = filePath.toLowerCase().endsWith('.properties') ? readProperties(source) : readYaml(source, facts);
   facts.contextPath = pick(values, CONTEXT_KEYS);
   facts.servletPath = pick(values, SERVLET_KEYS);
+  const key = [...CONTEXT_KEYS, ...SERVLET_KEYS].find((k) => values.has(k));
+  if (key) facts.contextLine = lineOf(source, key);
   // Placeholders such as `${PORT:8081}` keep their default.
   const port = /^(?:\$\{[^:}]+:)?(\d{1,5})\}?$/.exec(pick(values, PORT_KEYS) ?? '');
   if (port && Number(port[1]) > 0 && Number(port[1]) < 65536) facts.serverPort = Number(port[1]);

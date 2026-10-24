@@ -204,6 +204,48 @@ describe('API Shadow intelligence features (Extension Development Host)', functi
     }
   });
 
+  it('discovers Laravel routes, opens their controllers and shows CodeLens in routes/api.php', async function () {
+    const result = api.getResult()!;
+    const show = result.endpoints.find((e) => e.framework === 'laravel' && e.method === 'GET' && e.path === '/api/articles/{article}');
+    assert.ok(show, result.endpoints.filter((e) => e.framework === 'laravel').map((e) => `${e.method} ${e.path}`).join('\n'));
+    assert.strictEqual(path.basename(show.handlerLocation!.file), 'ArticleController.php');
+    assert.strictEqual(result.endpoints.find((e) => e.framework === 'laravel' && e.method === 'POST' && e.path === '/api/logout')?.auth?.status, 'protected');
+    const routesFile = vscode.Uri.file(path.join(root(), 'laravel-app', 'routes', 'api.php'));
+    await vscode.window.showTextDocument(routesFile);
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>('vscode.executeCodeLensProvider', routesFile);
+    assert.ok(lenses.some((l) => l.command?.title.includes('GET /api/articles/{article}')), lenses.map((l) => l.command?.title).join('\n'));
+  });
+
+  it('generates PHPUnit feature tests for a Laravel controller', async function () {
+    const ids = api.getResult()!.endpoints.filter((e) => e.framework === 'laravel' && e.controller === 'EventController').map((e) => e.id);
+    const target = path.join(root(), 'laravel-app', 'tests', 'Feature', 'EventControllerApiTest.php');
+    created.push(target);
+    const accepted = await stubbed('showInformationMessage', 'Create', () => vscode.commands.executeCommand<vscode.Uri[]>('apiShadow.generateTests', ids));
+    assert.deepStrictEqual(accepted.value.map((u) => u.fsPath), [target]);
+    const content = fs.readFileSync(target, 'utf8');
+    assert.match(content, /class EventControllerApiTest extends TestCase/);
+    assert.match(content, /\$this->getJson\('\/api\/events'\)/);
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+  });
+
+  it('lists where an endpoint is mounted in the sidebar, and opens it on click', async function () {
+    await vscode.commands.executeCommand('apiShadow.groupBy', 'none');
+    try {
+      const node = api.getTreeChildren().find((n) => n.type === 'endpoint' && (n.endpoint.trace?.length ?? 0) > 0 && n.endpoint.framework === 'express');
+      assert.ok(node && node.type === 'endpoint', 'an Express endpoint with a mount');
+      const step = node.endpoint.trace![0];
+      const row = api.getTreeChildren(node).find((d) => d.type === 'detail' && d.label === step.text);
+      assert.ok(row, api.getTreeChildren(node).map((d) => (d.type === 'detail' ? d.label : '')).join('\n'));
+      const item = api.getTreeItem(row);
+      assert.strictEqual(item.command?.command, 'apiShadow.openLocation');
+      await vscode.commands.executeCommand(item.command!.command, ...(item.command!.arguments ?? []));
+      assert.strictEqual(vscode.window.activeTextEditor?.document.uri.fsPath, step.location!.file);
+      assert.strictEqual(vscode.window.activeTextEditor?.selection.active.line, step.location!.line - 1);
+    } finally {
+      await vscode.commands.executeCommand('apiShadow.groupBy', 'controller');
+    }
+  });
+
   it('exports the analysis report and the dependency graph', async function () {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'api-shadow-report-'));
     const report = vscode.Uri.file(path.join(dir, 'report.md'));

@@ -9,7 +9,7 @@
 import * as path from 'path';
 import type { CallableFact, ExpressRouteFact, HandlerFact, JsFileFacts, Pos, RefExpr, RouterLib, RouterNodeFact } from '../analyzers/facts';
 import { exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
-import type { Endpoint, PathExpr, ServiceCall, ServiceRef, SourceLocation } from '../core/types';
+import type { Endpoint, PathExpr, ServiceCall, ServiceRef, SourceLocation, TraceStep } from '../core/types';
 import { bodyFields, endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
@@ -238,7 +238,7 @@ export class ExpressLinker {
   // -----------------------------------------------------------------------------------------
 
   /** `orphanOf` is the unmounted root router the walk started from, if any. */
-  private walk(node: GraphNode, inherited: PathExpr[], middleware: string[], chain: string[], stack: Set<string>, orphanOf: string | undefined, depth: number, parentLib: RouterLib, registered: Chain): void {
+  private walk(node: GraphNode, inherited: PathExpr[], middleware: string[], chain: TraceStep[], stack: Set<string>, orphanOf: string | undefined, depth: number, parentLib: RouterLib, registered: Chain): void {
     if (depth > MAX_DEPTH) return;
     // Plugin and router parameters take the library of whatever they are attached to.
     const lib = node.fact.kind === 'param' ? parentLib : (node.fact.lib ?? parentLib);
@@ -259,13 +259,13 @@ export class ExpressLinker {
       const nextStack = new Set(stack).add(child.id);
       const at: Chain = [...registered, { scope: `${node.id}|${edge.file}`, order: edge.order }];
       for (const p of edge.paths) {
-        const note =
+        const text =
           edge.via === 'use'
-            ? `Mounted at "${exprToDisplay(p)}" (${shortFile(edge.file)}:${edge.pos.line})`
+            ? `Mounted at "${exprToDisplay(p)}"`
             : edge.via === 'register'
-              ? `Registered as a plugin${joinUrlPaths(exprToDisplay(p)) === '/' ? '' : ` with prefix "${exprToDisplay(p)}"`} (${shortFile(edge.file)}:${edge.pos.line})`
-              : `Registered via function call (${shortFile(edge.file)}:${edge.pos.line})`;
-        this.walk(child, [...prefixes, p], mw, [...chain, note], nextStack, orphanOf, depth + 1, lib, at);
+              ? `Registered as a plugin${joinUrlPaths(exprToDisplay(p)) === '/' ? '' : ` with prefix "${exprToDisplay(p)}"`}`
+              : 'Registered via function call';
+        this.walk(child, [...prefixes, p], mw, [...chain, { text, location: loc(edge.file, edge.pos) }], nextStack, orphanOf, depth + 1, lib, at);
       }
     }
   }
@@ -286,7 +286,7 @@ export class ExpressLinker {
     return out;
   }
 
-  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: string[], orphanOf: string | undefined, lib: RouterLib, registered: Chain): void {
+  private emit(file: string, route: ExpressRouteFact, exprs: PathExpr[], middleware: string[], chain: TraceStep[], orphanOf: string | undefined, lib: RouterLib, registered: Chain): void {
     const isStatic = exprs.every(isStaticExpr);
     const hasRegex = exprs.some((e) => e.parts.some((p) => 'regex' in p));
     // Regex routes cannot be joined like strings: show the prefix followed by the pattern.
@@ -296,7 +296,7 @@ export class ExpressLinker {
           .join(' ')}`
       : joinUrlPaths(...exprs.map(exprToDisplay));
     const location = loc(file, route.pos);
-    const notes = [...chain];
+    const notes = chain.map(noteOf);
     if (!isStatic) notes.push(hasRegex ? 'Route uses a regular expression.' : 'Path contains expressions that could not be resolved statically.');
     if (orphanOf) notes.push('Mount point not found: path is relative to its router.');
     const handler = route.handler;
@@ -325,7 +325,8 @@ export class ExpressLinker {
       projectRoot: this.ctx.projectRootOf(file),
       ...bodyFields(body, bodyFile, lib),
     };
-    endpoint.id = endpointId(endpoint, chain.join('>'));
+    if (chain.length) endpoint.trace = chain;
+    endpoint.id = endpointId(endpoint, notes.slice(0, chain.length).join('>'));
     if (this.seen.has(endpoint.id)) return;
     this.seen.add(endpoint.id);
     this.endpoints.push(endpoint);
@@ -398,6 +399,11 @@ export class ExpressLinker {
     }
     return out;
   }
+}
+
+/** A trace step as a note: `Mounted at "/api" (app.js:12)`. */
+function noteOf(step: TraceStep): string {
+  return step.location ? `${step.text} (${shortFile(step.location.file)}:${step.location.line})` : step.text;
 }
 
 function nodeId(file: string, key: string): string {

@@ -163,6 +163,21 @@ export class Dashboard implements vscode.Disposable {
           if (check?.(args)) await vscode.commands.executeCommand(id, ...args);
           return;
         }
+        case 'copy': {
+          // Paths and cURL-like text only; never more than a few KB.
+          if (typeof msg.text !== 'string' || msg.text.length > 4000) return;
+          await vscode.env.clipboard.writeText(msg.text);
+          void vscode.window.setStatusBarMessage(`Copied ${msg.text.length > 60 ? msg.text.slice(0, 57) + '…' : msg.text}`, 2500);
+          return;
+        }
+        case 'endpoint': {
+          // Endpoint actions by id: the host looks the endpoint up, the webview never sends one.
+          const actions: Record<string, string> = { flow: 'apiShadow.showFlow', request: 'apiShadow.openRequest', curl: 'apiShadow.copyCurl', callers: 'apiShadow.showCallers' };
+          const command = typeof msg.action === 'string' && Object.prototype.hasOwnProperty.call(actions, msg.action) ? actions[msg.action] : undefined;
+          const e = typeof msg.id === 'string' ? this.deps.controller.current?.endpoints.find((x) => x.id === msg.id) : undefined;
+          if (command && e) await vscode.commands.executeCommand(command, e);
+          return;
+        }
         case 'graphFocus': {
           const query = typeof msg.query === 'string' ? msg.query.trim().slice(0, 200).toLowerCase() : '';
           const result = this.deps.controller.current;
@@ -179,7 +194,7 @@ export class Dashboard implements vscode.Disposable {
           const result = this.deps.controller.current;
           const ids = Array.isArray(msg.endpointIds) ? msg.endpointIds.filter((x): x is string => typeof x === 'string').slice(0, 200) : [];
           const known = new Set(result?.endpoints.map((e) => e.id));
-          const runner = typeof msg.runner === 'string' && /^(auto|jest|vitest|mocha|junit)$/.test(msg.runner) ? msg.runner : undefined;
+          const runner = typeof msg.runner === 'string' && /^(auto|jest|vitest|mocha|junit|phpunit)$/.test(msg.runner) ? msg.runner : undefined;
           const valid = ids.filter((id) => known.has(id));
           if (valid.length) await this.deps.generateTests(valid, runner === 'auto' ? undefined : runner);
           return;

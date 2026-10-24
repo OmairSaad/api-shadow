@@ -610,3 +610,399 @@ svg.graph:active {
     transition: outline-color 0.6s;
   }
 }
+
+/* Endpoint details */
+.endpoint-details {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.dhead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.dtitle h2 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 1.1em;
+}
+.dpath {
+  font-weight: 600;
+}
+.dmeta {
+  color: var(--muted);
+}
+button.icon {
+  padding: 0 6px;
+  line-height: 1.6;
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+button.icon:hover {
+  color: var(--vscode-foreground);
+  background: var(--vscode-toolbar-hoverBackground);
+}
+.actions-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.actions-bar .act {
+  padding: 3px 10px;
+}
+.dcard {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--vscode-editor-background);
+}
+.dcard h3 {
+  margin: 0 0 8px;
+  font-size: 0.95em;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+.details section.dcard {
+  margin-top: 0;
+}
+
+/* How the path is built */
+ol.stepper {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  position: relative;
+}
+ol.stepper::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 12px;
+  bottom: 12px;
+  border-left: 2px solid var(--border);
+}
+.stepper .step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px 1fr;
+  column-gap: 8px;
+  row-gap: 1px;
+  align-items: center;
+  padding: 5px 6px;
+  border-radius: 4px;
+}
+.stepper .step.clickable {
+  cursor: pointer;
+}
+.stepper .step.clickable:hover,
+.stepper .step.clickable:focus-visible {
+  background: var(--vscode-list-hoverBackground);
+}
+.stepper .dot {
+  z-index: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75em;
+  background: var(--vscode-editorWidget-background, var(--card));
+  border: 2px solid var(--vscode-focusBorder);
+  color: var(--vscode-foreground);
+}
+.stepper .step.strong .dot {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-color: var(--vscode-button-background);
+}
+.stepper .step.strong .stext {
+  font-weight: 600;
+}
+.stepper .sloc {
+  grid-column: 2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--vscode-textLink-foreground);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.stepper .sloc.muted {
+  color: var(--muted);
+}
+
+/* Request and response */
+table.mini {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95em;
+}
+table.mini th,
+table.mini td {
+  text-align: left;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+table.mini th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.chip-status {
+  display: inline-block;
+  padding: 0 8px;
+  margin: 0 4px 6px 0;
+  border-radius: 10px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.85em;
+  border: 1px solid var(--border);
+}
+.chip-status.s2 {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+.chip-status.s3 {
+  color: var(--vscode-charts-blue);
+  border-color: var(--vscode-charts-blue);
+}
+.chip-status.s4 {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+.chip-status.s5 {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+ol.mw {
+  margin: 0;
+  padding-left: 20px;
+}
+ol.mw li {
+  padding: 2px 0;
+}
+ol.mw li.auth code {
+  color: var(--ok);
+}
+
+/* Sortable, sticky table headers */
+table.grid thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--vscode-editor-background);
+}
+button.sort {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font-weight: 600;
+}
+button.sort:hover {
+  color: var(--vscode-foreground);
+  background: none;
+}
+th[aria-sort='ascending'] button.sort,
+th[aria-sort='descending'] button.sort {
+  color: var(--vscode-foreground);
+}
+
+/* Graph */
+.zoom-level {
+  min-width: 44px;
+  text-align: center;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.legend .lg.hint {
+  margin-left: auto;
+}
+.split > .list {
+  max-height: calc(100vh - 230px);
+  overflow: auto;
+}
+@media (max-width: 900px) {
+  .split > .list {
+    max-height: none;
+  }
+}
+
+/* Mount links */
+button.mount-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 6px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--vscode-textLink-foreground);
+  font-size: 0.95em;
+}
+button.mount-link:hover,
+button.mount-link:focus-visible {
+  border-color: var(--border);
+  background: var(--vscode-list-hoverBackground);
+}
+.mount-file {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.9em;
+}
+
+/* API map */
+ul.api-map,
+ul.map-children {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+ul.map-children {
+  margin-left: 14px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border);
+}
+.map-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 3px 4px;
+  border-radius: 4px;
+}
+.map-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+.map-row .seg {
+  font-weight: 600;
+}
+.map-row .seg.param {
+  color: var(--vscode-charts-purple);
+}
+.map-row .count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 9px;
+  text-align: center;
+  font-size: 0.8em;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+.map-row .methods {
+  display: inline-flex;
+  gap: 3px;
+}
+.mdot {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.7em;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+}
+button.twisty {
+  width: 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+}
+.twisty.spacer {
+  display: inline-block;
+  width: 20px;
+}
+.map-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 4px 2px 28px;
+}
+button.leaf {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 4px;
+  background: none;
+  border: none;
+  color: var(--vscode-foreground);
+}
+button.leaf:hover {
+  text-decoration: underline;
+}
+
+/* At a glance */
+.glance .mbar {
+  display: flex;
+  height: 10px;
+  margin: 4px 0 8px;
+  border-radius: 5px;
+  overflow: hidden;
+  background: var(--border);
+}
+.glance .mseg {
+  display: block;
+  min-width: 3px;
+}
+.mseg.m-get, .mswatch.m-get { background: var(--vscode-charts-green); }
+.mseg.m-post, .mswatch.m-post { background: var(--vscode-charts-yellow); }
+.mseg.m-put, .mswatch.m-put { background: var(--vscode-charts-blue); }
+.mseg.m-patch, .mswatch.m-patch { background: var(--vscode-charts-purple); }
+.mseg.m-delete, .mswatch.m-delete { background: var(--vscode-charts-red); }
+.mseg.m-all, .mseg.m-options, .mseg.m-head, .mswatch.m-all, .mswatch.m-options, .mswatch.m-head { background: var(--vscode-charts-orange); }
+.glance .mlegend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 8px;
+  color: var(--muted);
+  font-size: 0.9em;
+}
+.mswatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+.glance .prefixes li {
+  padding: 2px 0;
+}
+
+/* Long file paths shrink with an ellipsis instead of wrapping mid-path. */
+.map-row .mount-link,
+.map-endpoint .link {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.map-row .mount-label,
+button.leaf {
+  white-space: nowrap;
+}
+.map-endpoint {
+  flex-wrap: wrap;
+}
+
+/* Explorer table: keep paths and mount links on one line; long mounts end with an ellipsis. */
+table.grid td code,
+table.grid td.nowrap {
+  white-space: nowrap;
+}
+table.grid td.mount {
+  max-width: 200px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}

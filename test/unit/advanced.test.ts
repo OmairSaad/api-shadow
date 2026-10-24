@@ -169,6 +169,16 @@ describe('Frontend and test calls', () => {
     ]);
   });
 
+  it('reads the fetch method from a local options object', async () => {
+    const { result } = await analyzeFiles({
+      ...backend,
+      'web/package.json': '{}',
+      'web/src/a.js': `const POST = 'POST';\nasync function add() {\n  const requestOptions = { method: 'POST', redirect: 'follow' };\n  await fetch('/api/users', requestOptions);\n}\nasync function list() {\n  const requestOptions = { redirect: 'follow' };\n  await fetch('/api/users', requestOptions);\n}\nfetch('/api/users', { method: POST });\nfunction send(options) { return fetch('/api/users', options); }\nconst del = { method: 'DELETE' };\nfetch('/api/users', del);`,
+    });
+    expect(result.clientCalls.map((c) => c.method)).toEqual(['POST', 'GET', 'POST', 'ALL', 'DELETE']);
+    expect(issues(result, 'broken-call')).toEqual(['No route matches DELETE /api/users (fetch, a.js:13). Routes with this path exist for GET, POST.']);
+  });
+
   it('counts supertest, Nest e2e and MockMvc requests as tests', async () => {
     const { result } = await analyzeFiles({
       ...backend,

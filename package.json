@@ -1,8 +1,8 @@
 {
   "name": "api-shadow",
   "displayName": "API Shadow",
-  "description": "See every API endpoint in Express, Fastify, Koa, NestJS and Spring Boot, and what calls it: change impact on frontend code, OpenAPI contract diffs, a security radar, a dependency graph and generated tests. Fully local.",
-  "version": "0.4.0",
+  "description": "See every API endpoint in Express, Fastify, Koa, NestJS, Spring Boot and Laravel, and what calls it: change impact on frontend code, OpenAPI contract diffs, a security radar, a dependency graph and generated tests. Fully local.",
+  "version": "0.5.0",
   "publisher": "OmairSaad",
   "license": "MIT",
   "author": {
@@ -52,14 +52,19 @@
     "impact analysis",
     "dependency graph",
     "test generation",
-    "api contract"
+    "api contract",
+    "laravel",
+    "php"
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "workspaceContains:**/package.json",
-    "workspaceContains:**/pom.xml",
-    "workspaceContains:**/build.gradle",
-    "workspaceContains:**/build.gradle.kts"
+    "workspaceContains:package.json",
+    "workspaceContains:pom.xml",
+    "workspaceContains:build.gradle",
+    "workspaceContains:build.gradle.kts",
+    "workspaceContains:composer.json",
+    "workspaceContains:artisan",
+    "onStartupFinished"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -107,7 +112,7 @@
     "viewsWelcome": [
       {
         "view": "apiShadow.endpoints",
-        "contents": "Open a folder that contains an Express, Fastify, Koa, NestJS or Spring Boot project to discover its API endpoints.\n[Open Folder](command:workbench.action.files.openFolder)",
+        "contents": "Open a folder that contains an Express, Fastify, Koa, NestJS, Spring Boot or Laravel project to discover its API endpoints.\n[Open Folder](command:workbench.action.files.openFolder)",
         "when": "workbenchState == empty"
       },
       {
@@ -117,7 +122,7 @@
       },
       {
         "view": "apiShadow.endpoints",
-        "contents": "No API endpoints were found.\nAPI Shadow supports Express, Fastify, Koa, NestJS and Spring Boot (Java). Check the Issues view for files that could not be analyzed.\n[Refresh](command:apiShadow.refresh)\n[Show Log](command:apiShadow.showLog)",
+        "contents": "No API endpoints were found.\nAPI Shadow supports Express, Fastify, Koa, NestJS, Spring Boot (Java) and Laravel (PHP). Check the Issues view for files that could not be analyzed.\n[Refresh](command:apiShadow.refresh)\n[Show Log](command:apiShadow.showLog)",
         "when": "workbenchState != empty && apiShadow.ready && !apiShadow.hasEndpoints"
       },
       {
@@ -578,7 +583,8 @@
               "fastify",
               "koa",
               "nestjs",
-              "spring"
+              "spring",
+              "laravel"
             ]
           },
           "default": [
@@ -586,7 +592,8 @@
             "fastify",
             "koa",
             "nestjs",
-            "spring"
+            "spring",
+            "laravel"
           ],
           "uniqueItems": true,
           "description": "Frameworks to detect."
@@ -724,7 +731,8 @@
             "^(UseGuards|APP_GUARD|useGlobalGuards)\\((?!.*(throttl|ratelimit))",
             "Secured",
             "RolesAllowed",
-            "DenyAll"
+            "DenyAll",
+            "^can:"
           ],
           "markdownDescription": "Case-insensitive regular expressions matched against middleware, guards, security annotations and decorators (e.g. `UseGuards(JwtAuthGuard)`, `requireAuth`). A match marks the endpoint as protected. Add your own auth middleware names here."
         },
@@ -892,7 +900,7 @@
         "apiShadow.testGeneration.directory": {
           "type": "string",
           "default": "",
-          "markdownDescription": "Folder for generated test files, relative to the project root (e.g. `test/api`). When empty: an existing `test/`, `tests/` or `__tests__/` folder, else `tests/api`; `src/test/java` for Spring."
+          "markdownDescription": "Folder for generated test files, relative to the project root (e.g. `test/api`). When empty: an existing `test/`, `tests/` or `__tests__/` folder, else `tests/api`; `src/test/java` for Spring, `tests/Feature` for Laravel."
         }
       }
     }

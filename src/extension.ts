@@ -45,7 +45,7 @@ export function activate(context: vscode.ExtensionContext): ApiShadowApi {
   const diagnostics = new ApiDiagnostics();
   const clientLinks = new ClientCallLinks();
   const flow = new FlowView();
-  const sourceFiles: vscode.DocumentSelector = { scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java}' };
+  const sourceFiles: vscode.DocumentSelector = { scheme: 'file', pattern: '**/*.{js,cjs,mjs,jsx,ts,cts,mts,tsx,java,php}' };
   const codeLens = new EndpointCodeLensProvider(() => controller.settings.codeLens);
 
   const dismissals = new Dismissals(context.workspaceState);

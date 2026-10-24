@@ -5,7 +5,7 @@
  */
 import type { JavaClassFact, JavaFileFacts, JavaMapping, JavaMethodFact, SpringConfigFacts } from '../analyzers/facts';
 import { compactExpr, exprToDisplay, isStaticExpr, joinUrlPaths } from '../core/paths';
-import type { Endpoint, EndpointResponse, EndpointRisk, PathExpr, PathPart, ServiceRef, Shape, ShapeProp, SourceLocation } from '../core/types';
+import type { Endpoint, EndpointResponse, EndpointRisk, PathExpr, PathPart, ServiceRef, Shape, ShapeProp, SourceLocation, TraceStep } from '../core/types';
 import { endpointId, LinkContext, loc, shortFile } from './context';
 import { own } from '../core/records';
 
@@ -33,7 +33,7 @@ export class SpringLinker {
   constructor(private readonly ctx: LinkContext) {}
 
   link(): Endpoint[] {
-    const contextPaths = new Map<string, { value: string; file: string }>();
+    const contextPaths = new Map<string, { value: string; file: string; line: number }>();
     for (const [file, facts] of this.ctx.files()) {
       if (facts.lang === 'java') this.index(file, facts);
       if (facts.lang === 'spring-config' && this.ctx.options.springApplyContextPath) {
@@ -42,7 +42,7 @@ export class SpringLinker {
           const root = this.ctx.projectRootOf(file);
           // application.properties wins over application.yml when both exist (Spring loads both; properties takes precedence).
           const existing = contextPaths.get(root);
-          if (!existing || file.endsWith('.properties')) contextPaths.set(root, { value, file });
+          if (!existing || file.endsWith('.properties')) contextPaths.set(root, { value, file, line: (facts as SpringConfigFacts).contextLine ?? 1 });
         }
       }
     }
@@ -165,7 +165,7 @@ export class SpringLinker {
     return { source: entry };
   }
 
-  private expand(entry: ClassEntry, contextPath: { value: string; file: string } | undefined): Endpoint[] {
+  private expand(entry: ClassEntry, contextPath: { value: string; file: string; line: number } | undefined): Endpoint[] {
     const { mapping: classMapping, source: classMappingSource } = this.classMapping(entry);
     const classPaths = classMapping ? classMapping.paths.map((p) => this.resolveExpr(p, classMappingSource)) : [{ parts: [{ lit: '' }] }];
     const methods: { method: JavaMethodFact; owner: ClassEntry; impl?: JavaMethodFact }[] = [];
@@ -193,10 +193,15 @@ export class SpringLinker {
         for (const mPath of methodPaths) {
           for (const httpMethod of httpMethods) {
             const notes: string[] = [];
+            const trace: TraceStep[] = [];
             const exprs: PathExpr[] = [];
             if (contextPath) {
               exprs.push({ parts: [{ lit: contextPath.value }] });
               notes.push(`Context path "${contextPath.value}" from ${shortFile(contextPath.file)}`);
+              trace.push({ text: `Context path "${contextPath.value}"`, location: loc(contextPath.file, { line: contextPath.line, column: 1 }) });
+            }
+            if (classMapping && joinUrlPaths(exprToDisplay(cPath)) !== '/') {
+              trace.push({ text: `@RequestMapping("${exprToDisplay(cPath)}") on ${classMappingSource.cls.name}`, location: loc(classMappingSource.file, classMappingSource.cls.pos) });
             }
             exprs.push(cPath, mPath);
             const isStatic = exprs.every(isStaticExpr);
@@ -225,6 +230,7 @@ export class SpringLinker {
               validation: method.bodyType && (method.bodyValidated || impl?.bodyValidated) ? { status: 'validated', via: ['@Valid'] } : undefined,
               conditions: conditions.length ? conditions : undefined,
               notes,
+              trace: trace.length ? trace : undefined,
               projectRoot: this.ctx.projectRootOf(entry.file),
               ...this.bodyOf(implMethod, implFile === entry.file ? entry : owner, method),
             };

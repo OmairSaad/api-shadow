@@ -20,7 +20,7 @@ export interface DashboardInput {
   /** Search results to focus the graph on. */
   graphFocus?: { query: string; ids: ReadonlySet<string> };
   contracts: { files: string[]; last?: ContractView };
-  testProjects: { root: string; label: string; kind: 'node' | 'java'; runner: string }[];
+  testProjects: { root: string; label: string; kind: 'node' | 'java' | 'php'; runner: string }[];
   relativePath: (file: string) => string;
   workspace: string;
 }
@@ -113,7 +113,9 @@ export function buildDashboardModel(input: DashboardInput, table: RefTable): Das
     dataAccess: e.dataAccess ?? [],
     security: securityCount.get(e.id) ?? 0,
     impacted: impactedEndpoint.get(e.id),
-    notes: e.notes,
+    trace: (e.trace ?? []).map((t) => ({ text: t.text, where: at(t.location), ref: table.ref(t.location) })),
+    // Notes already shown as trace steps are left out.
+    notes: e.notes.filter((n) => !(e.trace ?? []).some((t) => n.startsWith(t.text))),
     version: e.version,
   }));
 

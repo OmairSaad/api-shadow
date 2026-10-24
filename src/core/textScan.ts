@@ -8,7 +8,7 @@
  */
 import type { RiskFact } from '../analyzers/facts';
 
-export type ScanKind = 'js' | 'java' | 'config';
+export type ScanKind = 'js' | 'java' | 'config' | 'php';
 
 interface KnownPattern {
   re: RegExp;
@@ -93,6 +93,9 @@ export function scanText(source: string, kind: ScanKind): RiskFact[] {
   };
   let corsAny: number | undefined;
   let corsCredentials = false;
+  // Laravel `config/app.php` with debug forced on, and `config/cors.php` allowing any origin.
+  const laravelAppConfig = kind === 'php' && /'providers'\s*=>|'timezone'\s*=>/.test(source);
+  const laravelCors = kind === 'php' && /'allowed_origins'\s*=>/.test(source);
   for (let i = 0; i < lines.length && out.length < MAX_FINDINGS; i++) {
     const line = lines[i];
     if (line.length > MAX_LINE) continue;
@@ -117,6 +120,13 @@ export function scanText(source: string, kind: ScanKind): RiskFact[] {
       if (/allowedOrigin(Pattern)?s\s*\(\s*"\*"|addAllowedOrigin(Pattern)?\s*\(\s*"\*"|setAllowedOrigin(Pattern)?s\s*\([^)]*"\*"/.test(line)) corsAny ??= i;
       if (/allowCredentials\s*\(\s*true|setAllowCredentials\s*\(\s*true/.test(line)) corsCredentials = true;
     }
+    if (laravelAppConfig && /^\s*'debug'\s*=>\s*true\b/.test(line)) {
+      out.push({ rule: 'error-details', pos: { line: i + 1, column: line.indexOf("'debug'") + 1 }, evidence: "'debug' => true in config/app.php", detail: 'stack' });
+    }
+    if (laravelCors) {
+      if (/'allowed_origins'\s*=>\s*\[\s*'\*'/.test(line) || /'allowed_origins_patterns'\s*=>\s*\[\s*'(\.\*|\*)'/.test(line)) corsAny ??= i;
+      if (/'supports_credentials'\s*=>\s*true/.test(line)) corsCredentials = true;
+    }
     if (kind === 'config') {
       if (/^\s*[#!]/.test(line)) continue;
       const m = CONFIG_ENTRY.exec(line);
@@ -133,7 +143,8 @@ export function scanText(source: string, kind: ScanKind): RiskFact[] {
     }
   }
   if (corsAny !== undefined) {
-    out.push({ rule: 'permissive-cors', pos: { line: corsAny + 1, column: 1 }, evidence: corsCredentials ? 'allowedOrigins("*") with allowCredentials(true)' : 'allowedOrigins("*")', detail: corsCredentials ? 'any+credentials' : 'any' });
+    const evidence = kind === 'php' ? (corsCredentials ? "'allowed_origins' => ['*'] with 'supports_credentials' => true" : "'allowed_origins' => ['*']") : corsCredentials ? 'allowedOrigins("*") with allowCredentials(true)' : 'allowedOrigins("*")';
+    out.push({ rule: 'permissive-cors', pos: { line: corsAny + 1, column: 1 }, evidence, detail: corsCredentials ? 'any+credentials' : 'any' });
   }
   return out;
 }

@@ -30,8 +30,13 @@ export function flowSteps(e: Endpoint, result: AnalysisResult): Step[] {
     steps.push({ kind: 'client', title: `${c.kind === 'test' ? 'Test' : 'Caller'}: ${c.client}`, detail: `${relativePath(c.location.file)}:${c.location.line}`, location: c.location });
   }
   if (callers.length > 6) steps.push({ kind: 'client', title: `…and ${callers.length - 6} more callers` });
-  for (const n of e.notes) {
-    if (/^(Mounted at|Registered|Global prefix|RouterModule|URI version|Context path)/.test(n)) steps.push({ kind: 'mount', title: n });
+  // How the path is built: each mount, prefix or group, opening where it is declared.
+  if (e.trace?.length) {
+    for (const t of e.trace) steps.push({ kind: 'mount', title: t.text, detail: t.location ? `${relativePath(t.location.file)}:${t.location.line}` : undefined, location: t.location });
+  } else {
+    for (const n of e.notes) {
+      if (/^(Mounted at|Registered|Global prefix|RouterModule|URI version|Context path)/.test(n)) steps.push({ kind: 'mount', title: n });
+    }
   }
   for (const m of e.middleware) {
     const isAuth = e.auth?.via.includes(m);

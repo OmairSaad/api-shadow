@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.0
+
+- **Laravel (PHP) support**: routes from `routes/*.php` with `Route::get/post/put/patch/delete/any/match`, `view` and `redirect`; `resource`, `apiResource`, `resources` and `singleton` with `only`/`except`/`parameters`/`names` and nested resources; array and fluent groups with prefixes, middleware, names and controllers; route files loaded by `withRouting()` (including `apiPrefix` and the `/up` health route), service providers and `require`; the `/api` prefix of `routes/api.php`. Routes link to their controller methods (FormRequest and `$request->validate()` validation, response shapes, route model binding, injected services), `auth:sanctum` and `can:` count as auth, and frontend calls and feature tests (`$this->getJson()`) are matched to them.
+- Impact analysis, response checks, the Security Radar (raw SQL with input, `$request->all()` written to models, `config/cors.php`, `'debug' => true`, credentials in PHP config), the dependency graph and the dashboard cover Laravel endpoints. **Generate API Tests…** writes PHPUnit feature tests.
+- CodeLens summarizes lines that declare several routes (resource routes) instead of repeating actions for each.
+- `vendor/` folders are excluded from analysis.
+- **Dashboard endpoint details** redesigned: *How this path is built* lists every mount, prefix, group, context path and loaded route file in order, and each step opens where it is declared (Express mounts, NestJS global prefix, versioning and controller path, Spring context path and class mapping, Laravel groups, providers and `withRouting()`). Actions for Request Flow, Try it, cURL, callers and tests; parameters table; status codes as chips; middleware in order with auth highlighted; the endpoint's security findings; copy path.
+- **Where an endpoint is mounted**, one click away: the API Explorer has a *Mounted at* column, and the sidebar lists each endpoint's mounts and prefixes; both open the line that declares them.
+- **API map** in the API Explorer: the API as a tree of path prefixes, with endpoint counts, methods and every place a prefix is mounted. Filter, expand and collapse; endpoints open their details.
+- **API at a glance** on the Overview: endpoints by method and the largest path prefixes with where they are mounted.
+- The Request Flow view opens each mount step at its source.
+- API Explorer: sortable columns, arrow-key navigation through endpoints, a sticky header.
+- Dependency graph: panning no longer clears the selected node; Esc clears it, and the zoom level is shown.
+
+## 0.4.1
+
+- API Shadow now activates in large workspaces and parent folders. It used to search every folder (including `node_modules`) for a `package.json`, `pom.xml` or Gradle build, and VS Code gave up and never started it.
+- `fetch(url, requestOptions)` uses the method of a local options object (`const requestOptions = { method: 'POST' }`). These calls were read as GET and reported as calls to missing routes. When the options can't be read, the call matches any method.
+
 ## 0.4.0
 
 - **Dashboard** (**API Shadow: Open Dashboard**, or click the status bar): overview, a searchable API explorer with callers, inferred responses and tests, impact analysis, security, dependency graph, contract comparison and test generation in one view.

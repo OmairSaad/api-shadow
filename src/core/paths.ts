@@ -58,7 +58,7 @@ export function joinUrlPaths(...segments: string[]): string {
  */
 export function normalizeForComparison(path: string, framework: Framework = 'express'): string {
   const normalizeText = (text: string): string =>
-    framework === 'spring'
+    framework === 'spring' || framework === 'laravel'
       ? text.replace(/\{\s*(\*)?[^}:]*?(?::([^}]*))?\}/g, (_m, star: string | undefined, pattern: string | undefined) => `{${star ?? ''}${pattern ?? ''}}`)
       : text.replace(/:[A-Za-z_$][\w$]*(?:\(([^)]*)\))?(\?)?/g, (_m, pattern: string | undefined, optional: string | undefined) => `{${pattern ?? ''}}${optional ?? ''}`);
   // Split out `${...}` so neither syntax is applied inside unresolved expressions.

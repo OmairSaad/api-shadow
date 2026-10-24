@@ -115,6 +115,12 @@ Facts are versioned with `FACTS_VERSION`. Bump it whenever extraction semantics 
 - Classes and interfaces (including nested ones) record mappings, security annotations, `extends`/`implements`, typed fields, methods, parameters and `field.method(...)` calls.
 - A Java file that fails to parse is reported; there is no partial recovery for Java.
 
+### PHP / Laravel (`analyzers/phpParser.ts`, `analyzers/phpAnalyzer.ts`)
+
+- `phpParser.ts` is a small hand-written tokenizer and parser (no dependency): statements, blocks, classes and methods, closures and arrow functions, arrays, call chains (`Route::prefix()->group()`), named arguments, `use` imports (including group imports). A statement it can't parse is skipped up to the next `;`/`}` and counted in a file issue; heredocs, attributes and inline HTML are skipped.
+- `phpAnalyzer.ts` interprets `Route::…` chains (and `$router->…`) with a group context (prefix, middleware, name, controller, namespace): verbs, `match`, `any`, `view`, `redirect`, `fallback`, resources and singletons (expanded into their actions here), groups with closures or route files (`PhpIncludeFact`), `withRouting()` (`PhpRoutingFact`), and `$this->getJson()`-style test calls. Classes record methods with parameters, FormRequests, `validate()` calls, body facts (responses from `response()->json()`, arrays, `noContent()`, `abort()`, `findOrFail()`; Eloquent data access; risks from request input; reads of the current user and `authorize()`), and constructor-injected services.
+- `isPhpCandidate` keeps only route files, `bootstrap/app.php`, providers and feature tests; controllers are requested on demand by the linker.
+
 ### Spring configuration (`analyzers/springConfig.ts`)
 
 Reads only the context-path keys. All other values are discarded during parsing.
@@ -137,6 +143,10 @@ Per project root (nearest `package.json`), combines `setGlobalPrefix` (+ `exclud
 ### Spring (`linkers/springLinker.ts`)
 
 Indexes classes by simple name and FQN, and constants by `Class.NAME` (plus every nested-class suffix). Concrete controller classes collect their own mappings plus those inherited from interfaces and superclasses (an own mapping wins). Constant references resolve through the class chain, static imports, wildcard static imports and inherited interfaces. The context path is applied per module (nearest `pom.xml`/`build.gradle`).
+
+### Laravel (`linkers/laravelLinker.ts`)
+
+Each route file gets the contexts it is loaded with: from the files that include it (recursively), from `withRouting()` (`api` gets `apiPrefix` or `api` plus the `api` group), or Laravel's defaults by path (`routes/api.php` → `/api`, `routes/web.php` → `web`). Files that only load route files (providers, `bootstrap/app.php`) add nothing themselves. Other files with routes are kept relative to themselves (`relativeTo`). Controllers are found by class name (`<Name>.php`, preferring the namespace from the route file's imports); route model binding adds a 404 response. Paths use `{param}` like Spring, so path matching and duplicate keys treat both alike; routes are registered per file for unreachable-route checks, except `->where()`-constrained ones.
 
 ## VS Code layer
 

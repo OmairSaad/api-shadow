@@ -36,7 +36,7 @@ export function parseRoute(path: string, framework: Framework): Segment[] | unde
   for (let i = 0; i < parts.length; i++) {
     const seg = parts[i];
     const last = i === parts.length - 1;
-    if (framework === 'spring') {
+    if (framework === 'spring' || framework === 'laravel') {
       if (seg === '**' || /^\{\*[^}]*\}$/.test(seg)) {
         if (!last) return undefined;
         segments.push({ kind: 'rest' });

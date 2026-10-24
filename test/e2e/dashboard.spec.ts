@@ -17,6 +17,9 @@ test.beforeAll(async () => {
     },
   });
   page = session.page;
+  // Wait until the extension's contributions are loaded and the first analysis is done.
+  await page.getByRole('tab', { name: /API Shadow/ }).waitFor();
+  await page.getByRole('button', { name: /^API Shadow: \d+ endpoint\(s\)/ }).waitFor();
 });
 
 test.afterAll(async () => {
@@ -62,7 +65,30 @@ test('explores endpoints with search and shows details with callers', async () =
   await expect(details.getByText('{ ready }')).toBeVisible();
   await expect(details.getByRole('heading', { name: 'Frontend callers (1)' })).toBeVisible();
   await expect(details.getByText('reads ready')).toBeVisible();
+  // How the path is built: every step opens where it is declared.
+  const stepper = details.getByRole('heading', { name: 'How this path is built' });
+  await expect(stepper).toBeVisible();
   await screenshot('dashboard-explorer');
+  await details.getByRole('button', { name: /Registered via function call, open .*app\.js:\d+/ }).click();
+  await expect(page.getByRole('tab', { name: /^app\.js/ })).toBeVisible();
+  // The Mounted at column opens the mount.
+  const mountColumn = (await d.locator('table.grid thead th').allTextContents()).findIndex((t) => /Mounted at/.test(t));
+  await expect(d.locator('table.grid tbody tr').first().locator('td').nth(mountColumn).getByRole('button', { name: /Registered via function call, open .*app\.js:\d+/ })).toBeVisible();
+  // Sorting by a column header.
+  await d.getByRole('searchbox', { name: 'Search endpoints' }).fill('');
+  await d.getByRole('button', { name: 'Sort by callers' }).click();
+  await expect(d.getByRole('columnheader', { name: /callers/i })).toHaveAttribute('aria-sort', 'ascending');
+  // The API map: path prefixes with where they are mounted.
+  await d.getByRole('button', { name: 'API map' }).click();
+  const users = d.locator('.map-row.depth-0').filter({ has: d.locator('code', { hasText: /^\/users$/ }) });
+  await expect(users).toBeVisible();
+  await expect(users.locator('.count')).toHaveText(/^\d+$/);
+  await expect(users.getByRole('button', { name: /mounted at/ })).toBeVisible();
+  await screenshot('dashboard-api-map');
+  // Expand /api and open where /api/products is mounted (a file no earlier step opened).
+  const products = d.locator('.map-row').filter({ has: d.locator('code', { hasText: /^\/products$/ }) }).filter({ has: d.getByRole('button', { name: /index\.js/ }) });
+  await products.getByRole('button', { name: /mounted at/ }).click();
+  await expect(page.getByRole('tab', { name: /^index\.js/ })).toBeVisible();
   await d.getByRole('button', { name: /Frontend requests/ }).click();
   await expect(d.locator('table.grid')).toContainText('/api/order');
   await expect(d.locator('table.grid')).toContainText('unmatched');
@@ -97,6 +123,14 @@ test('draws the dependency graph and highlights a node', async () => {
   await expect(details.getByRole('heading', { name: /GET \/health\/ready/ })).toBeVisible();
   await expect(details.getByRole('heading', { name: /Used by \(1\)/ })).toBeVisible();
   await expect(graph.locator('.node.dim').first()).toBeAttached();
+  // Panning the canvas keeps the selection.
+  const box = (await graph.boundingBox())!;
+  await page.mouse.move(box.x + box.width - 40, box.y + box.height - 40);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width - 160, box.y + box.height - 120, { steps: 8 });
+  await page.mouse.up();
+  await expect(details.getByRole('heading', { name: /GET \/health\/ready/ })).toBeVisible();
+  await expect(d.locator('#zoom-level')).toHaveText(/^\d+%$/);
   await screenshot('dashboard-graph');
   // Open the source of the selected node.
   await graph.getByRole('button', { name: 'endpoint: GET /health/ready' }).press('o');

@@ -39,7 +39,7 @@ const CONTRACT_GLOBS = ['**/{openapi,swagger,api,api-spec,api-docs,oas}.{json,ya
 export class IntelState {
   contractFiles: string[] = [];
   lastContract: ContractView | undefined;
-  testProjects: { root: string; label: string; kind: 'node' | 'java'; runner: string }[] = [];
+  testProjects: { root: string; label: string; kind: 'node' | 'java' | 'php'; runner: string }[] = [];
 
   constructor(private readonly controller: AnalysisController) {}
 
@@ -67,11 +67,12 @@ export class IntelState {
   /** Test setup per project that has endpoints, for the Test Generator tab. */
   async findTestProjects(): Promise<void> {
     const result = this.controller.current;
-    const roots = new Map<string, 'node' | 'java'>();
-    for (const e of result?.endpoints ?? []) roots.set(e.projectRoot, e.framework === 'spring' ? 'java' : 'node');
+    const roots = new Map<string, 'node' | 'java' | 'php'>();
+    for (const e of result?.endpoints ?? []) roots.set(e.projectRoot, projectKind(e));
     const out: IntelState['testProjects'] = [];
     for (const [root, kind] of roots) {
       if (kind === 'java') out.push({ root, label: relativePath(root) || path.basename(root), kind, runner: 'junit' });
+      else if (kind === 'php') out.push({ root, label: relativePath(root) || path.basename(root), kind, runner: 'PHPUnit' });
       else {
         const pkg = await readJson(path.join(root, 'package.json'));
         const setup = detectNodeSetup(pkg, await exists(path.join(root, 'tsconfig.json')));
@@ -341,8 +342,8 @@ export function registerIntelCommands(deps: IntelDeps, state: IntelState): Intel
   const generate = async (endpoints: Endpoint[], runner?: string): Promise<vscode.Uri[]> => {
     const groups = new Map<string, Endpoint[]>();
     for (const e of endpoints) {
-      const name = e.framework === 'spring' || e.framework === 'nestjs' ? (e.controller ?? path.basename(e.location.file)) : path.basename(e.location.file).replace(/\.[^.]+$/, '');
-      const key = `${e.projectRoot}|${e.framework === 'spring' ? 'java' : 'node'}|${name}`;
+      const name = e.framework === 'spring' || e.framework === 'nestjs' || e.framework === 'laravel' ? (e.controller ?? path.basename(e.location.file)) : path.basename(e.location.file).replace(/\.[^.]+$/, '');
+      const key = `${e.projectRoot}|${projectKind(e)}|${name}`;
       groups.set(key, [...(groups.get(key) ?? []), e]);
     }
     const generated: GeneratedTest[] = [];
@@ -353,7 +354,7 @@ export function registerIntelCommands(deps: IntelDeps, state: IntelState): Intel
     }
     // Preview first: open each file as an unsaved document.
     for (const g of generated) {
-      const doc = await vscode.workspace.openTextDocument({ language: g.runner === 'junit' ? 'java' : g.file.endsWith('.ts') ? 'typescript' : 'javascript', content: g.content });
+      const doc = await vscode.workspace.openTextDocument({ language: g.runner === 'junit' ? 'java' : g.runner === 'phpunit' ? 'php' : g.file.endsWith('.ts') ? 'typescript' : 'javascript', content: g.content });
       await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
     }
     const targets: string[] = [];
@@ -361,9 +362,10 @@ export function registerIntelCommands(deps: IntelDeps, state: IntelState): Intel
       const target = await nextFreeName(g.file, exists);
       targets.push(target);
       // A Java class must match its file name.
-      if (target !== g.file && g.runner === 'junit') {
-        const from = path.basename(g.file, '.java');
-        g.content = g.content.replace(new RegExp(`\\bclass ${from}\\b`), `class ${path.basename(target, '.java')}`);
+      if (target !== g.file && (g.runner === 'junit' || g.runner === 'phpunit')) {
+        const ext = path.extname(g.file);
+        const from = path.basename(g.file, ext);
+        g.content = g.content.replace(new RegExp(`\\bclass ${from}\\b`), `class ${path.basename(target, ext)}`);
       }
     }
     const warnings = [...new Set(generated.flatMap((g) => g.warnings))];
@@ -391,6 +393,12 @@ export function registerIntelCommands(deps: IntelDeps, state: IntelState): Intel
   const testProject = async (e: Endpoint, runner?: string): Promise<TestProject> => {
     const root = e.projectRoot;
     const configured = controller.settings.testDirectory;
+    if (e.framework === 'laravel') {
+      const composer = await readJson(path.join(root, 'composer.json'));
+      const deps = { ...((composer?.require as object) ?? {}), ...((composer?.['require-dev'] as object) ?? {}) };
+      const has = (name: string): boolean => Object.prototype.hasOwnProperty.call(deps, name);
+      return { kind: 'php', root, testDir: configured ? path.resolve(root, configured) : path.join(root, 'tests', 'Feature'), pest: has('pestphp/pest'), sanctum: has('laravel/sanctum') };
+    }
     if (e.framework === 'spring') {
       const info = controller.javaClass(e.location.file, e.controller ?? '');
       const contextNote = e.notes.find((n) => n.startsWith('Context path "'));
@@ -522,4 +530,8 @@ function insideWorkspace(uri: vscode.Uri): boolean {
   if (!folder) return false;
   const rel = path.relative(folder.uri.fsPath, uri.fsPath);
   return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+function projectKind(e: Endpoint): 'node' | 'java' | 'php' {
+  return e.framework === 'spring' ? 'java' : e.framework === 'laravel' ? 'php' : 'node';
 }
